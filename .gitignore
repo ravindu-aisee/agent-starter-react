@@ -34,6 +34,9 @@ yarn-error.log*
 .env*
 !.env.example
 
+# Google Cloud Vision credentials
+vision_ocr.json
+
 # vercel
 .vercel
 

@@ -14,11 +14,24 @@ interface DataChannelMessage {
   result?: string;
 }
 
+interface OCRResult {
+  success: boolean;
+  text: string;
+  detections: Array<{
+    text: string;
+    bounds: any;
+  }>;
+  wordCount?: number;
+  message?: string;
+}
+
 export function CameraComponent() {
   const [showCamera, setShowCamera] = useState(false);
   const [lastQuery, setLastQuery] = useState<DataChannelMessage | null>(null);
   const [isProcessing, setIsProcessing] = useState(false);
+  const [ocrResults, setOcrResults] = useState<string[]>([]);
   const webcamRef = useRef<Webcam>(null);
+  const ocrIntervalRef = useRef<NodeJS.Timeout | null>(null);
 
   // Set up the data channel listener
   const { send } = useDataChannel((message) => {
@@ -37,11 +50,26 @@ export function CameraComponent() {
     }
   });
 
-  // Auto-focus camera when it opens
+  // Auto-start OCR when camera opens
   useEffect(() => {
     if (showCamera) {
       console.log('📷 Camera overlay opened');
+      
+      // Send camera started message to backend
+      sendResponse('Camera started successfully. OCR is now running in the background.');
+      
+      // Wait a bit for camera to initialize, then start OCR
+      setTimeout(() => {
+        startContinuousOCR();
+      }, 2000);
+    } else {
+      // Stop OCR when camera closes
+      stopContinuousOCR();
     }
+
+    return () => {
+      stopContinuousOCR();
+    };
   }, [showCamera]);
 
   const sendResponse = useCallback((result: string) => {
@@ -67,62 +95,84 @@ export function CameraComponent() {
     }
   }, [send]);
 
-  const capture = useCallback(async () => {
-    if (isProcessing) {
-      console.log('⏳ Already processing, please wait...');
-      return;
-    }
+  const performOCR = useCallback(async () => {
+    if (isProcessing) return;
+    
+    const imageSrc = webcamRef.current?.getScreenshot();
+    if (!imageSrc) return;
 
     setIsProcessing(true);
-    console.log('📸 Capturing image...');
 
-    const imageSrc = webcamRef.current?.getScreenshot();
-    if (imageSrc) {
-      try {
-        // Here you would normally send the image to a processing service
-        // For now, we'll send back the bus number from the query or a mock result
-        const busNumber = lastQuery?.bus_number || 'Unknown';
-        const queryType = lastQuery?.query || 'detect_bus_number';
-        
-        let result = '';
-        
-        if (queryType.includes('detect') || queryType.includes('scan')) {
-          result = `Successfully captured image. Bus number ${busNumber} detected and verified.`;
-        } else {
-          result = `Image captured for query: ${queryType}. Bus number: ${busNumber}`;
-        }
+    try {
+      console.log('🔍 Running OCR on captured frame...');
+      
+      const response = await fetch('/api/ocr', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ image: imageSrc }),
+      });
 
-        console.log('✅ Image captured, sending result:', result);
-        sendResponse(result);
-        
-        // Close camera after successful capture
-        setTimeout(() => {
-          setShowCamera(false);
-          setIsProcessing(false);
-          setLastQuery(null);
-        }, 500);
-      } catch (error) {
-        console.error('❌ Error processing capture:', error);
-        sendResponse(`Error processing image: ${error instanceof Error ? error.message : 'Unknown error'}`);
-        setIsProcessing(false);
+      if (!response.ok) {
+        throw new Error(`OCR API error: ${response.statusText}`);
       }
-    } else {
-      console.error('❌ Failed to capture image from webcam');
-      sendResponse('Failed to capture image from camera');
+
+      const result: OCRResult = await response.json();
+      
+      if (result.success && result.text) {
+        console.log('✅ OCR detected text:', result.text);
+        
+        // Add to results array
+        setOcrResults(prev => {
+          const newResults = [...prev, result.text];
+          // Keep only last 10 results
+          return newResults.slice(-10);
+        });
+
+        // Check if detected text contains the bus number we're looking for
+        const expectedBusNumber = lastQuery?.bus_number;
+        if (expectedBusNumber && result.text.includes(expectedBusNumber)) {
+          console.log(`🎯 Found bus number ${expectedBusNumber}!`);
+          sendResponse(`Bus number ${expectedBusNumber} detected successfully! Full text: ${result.text}`);
+          
+          // Close camera after successful detection
+          setTimeout(() => {
+            setShowCamera(false);
+          }, 2000);
+        }
+      } else {
+        console.log('⚠️ No text detected in this frame');
+      }
+    } catch (error) {
+      console.error('❌ OCR error:', error);
+    } finally {
       setIsProcessing(false);
     }
-  }, [webcamRef, lastQuery, sendResponse, isProcessing]);
+  }, [webcamRef, isProcessing, lastQuery, sendResponse]);
 
-  const closeCamera = useCallback(() => {
-    console.log('🚫 User cancelled camera operation');
+  const startContinuousOCR = useCallback(() => {
+    console.log('🚀 Starting continuous OCR...');
     
-    // Send a cancellation response
-    sendResponse('User cancelled the camera operation.');
+    // Clear any existing interval
+    if (ocrIntervalRef.current) {
+      clearInterval(ocrIntervalRef.current);
+    }
+
+    // Run OCR every 2 seconds
+    ocrIntervalRef.current = setInterval(() => {
+      performOCR();
+    }, 2000);
+  }, [performOCR]);
+
+  const stopContinuousOCR = useCallback(() => {
+    console.log('🛑 Stopping continuous OCR...');
     
-    setShowCamera(false);
-    setIsProcessing(false);
-    setLastQuery(null);
-  }, [sendResponse]);
+    if (ocrIntervalRef.current) {
+      clearInterval(ocrIntervalRef.current);
+      ocrIntervalRef.current = null;
+    }
+  }, []);
 
   if (!showCamera) {
     return null;
@@ -136,7 +186,7 @@ export function CameraComponent() {
       left: 0,
       width: '100%',
       height: '100%',
-      backgroundColor: 'rgba(0, 0, 0, 0.9)',
+      backgroundColor: 'rgba(0, 0, 0, 0.95)',
       zIndex: 1000,
       display: 'flex',
       flexDirection: 'column',
@@ -148,14 +198,6 @@ export function CameraComponent() {
         textAlign: 'center',
         marginBottom: '1.5rem',
       }}>
-        <h2 style={{ fontSize: '1.5rem', fontWeight: 'bold', marginBottom: '0.5rem' }}>
-          Bus Number Detection
-        </h2>
-        <p style={{ fontSize: '1rem', opacity: 0.9 }}>
-          {lastQuery?.bus_number 
-            ? `Looking for bus number: ${lastQuery.bus_number}`
-            : 'Point camera at the bus number'}
-        </p>
       </div>
 
       <div style={{
@@ -164,6 +206,7 @@ export function CameraComponent() {
         borderRadius: '12px',
         overflow: 'hidden',
         boxShadow: '0 4px 20px rgba(0,0,0,0.5)',
+        border: isProcessing ? '3px solid #007bff' : '3px solid #28a745',
       }}>
         <Webcam
           audio={false}
@@ -178,60 +221,19 @@ export function CameraComponent() {
         />
       </div>
 
-      <div style={{
-        display: 'flex',
-        gap: '1rem',
-        marginTop: '2rem',
-      }}>
-        <button 
-          onClick={capture} 
-          disabled={isProcessing}
-          style={{ 
-            padding: '14px 32px', 
-            fontSize: '18px', 
-            fontWeight: '600',
-            cursor: isProcessing ? 'not-allowed' : 'pointer', 
-            borderRadius: '8px', 
-            border: 'none', 
-            background: isProcessing ? '#6c757d' : '#007bff', 
-            color: 'white',
-            opacity: isProcessing ? 0.6 : 1,
-            transition: 'all 0.2s',
-          }}
-        >
-          {isProcessing ? 'Processing...' : '📸 Capture'}
-        </button>
-        <button 
-          onClick={closeCamera} 
-          disabled={isProcessing}
-          style={{ 
-            padding: '14px 32px', 
-            fontSize: '18px',
-            fontWeight: '600',
-            background: 'transparent', 
-            border: '2px solid white', 
-            color: 'white', 
-            cursor: isProcessing ? 'not-allowed' : 'pointer', 
-            borderRadius: '8px',
-            opacity: isProcessing ? 0.6 : 1,
-            transition: 'all 0.2s',
-          }}
-        >
-          ❌ Cancel
-        </button>
-      </div>
 
       {lastQuery && (
         <div style={{
-          marginTop: '2rem',
+          marginTop: '1rem',
           padding: '1rem',
           background: 'rgba(255,255,255,0.1)',
           borderRadius: '8px',
-          fontSize: '0.9rem',
+          fontSize: '0.85rem',
           maxWidth: '600px',
+          width: '90%',
         }}>
-          <strong>Query:</strong> {lastQuery.query || 'N/A'}<br />
-          <strong>Bus Number:</strong> {lastQuery.bus_number || 'N/A'}
+          <strong>Target Bus Number:</strong> {lastQuery.bus_number || 'N/A'}<br />
+          <strong>Status:</strong> {isProcessing ? 'Scanning...' : 'Ready'}
         </div>
       )}
     </div>
