@@ -43,3 +43,40 @@ vision_ocr.json
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# Captured images and detection outputs
+/public/captured_images/
+*.jpg
+*.jpeg
+*.png
+!public/models/**/*.png
+!public/icons/**/*.png
+!public/images/**/*.png
+
+# API keys and secrets
+*.key
+*.pem
+*.p12
+*.pfx
+service-account*.json
+credentials*.json
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Logs
+logs/
+*.log
