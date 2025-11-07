@@ -83,9 +83,6 @@ importers:
       next-themes:
         specifier: ^0.4.6
         version: 0.4.6(react-dom@19.2.0(react@19.2.0))(react@19.2.0)
-      onnxruntime-web:
-        specifier: ^1.23.0
-        version: 1.23.0
       opencv.js:
         specifier: ^1.2.1
         version: 1.2.1
@@ -1673,9 +1670,6 @@ packages:
     resolution: {integrity: sha512-f7ccFPK3SXFHpx15UIGyRJ/FJQctuKZ0zVuN3frBo4HnK3cay9VEW0R6yPYFHC0AgqhukPzKjq22t5DmAyqGyw==}
     engines: {node: '>=16'}
 
-  flatbuffers@25.9.23:
-    resolution: {integrity: sha512-MI1qs7Lo4Syw0EOzUl0xjs2lsoeqFku44KpngfIduHBYvzm8h2+7K8YMQh1JtVVVrUvhLpNwqVi4DERegUJhPQ==}
-
   flatted@3.3.3:
     resolution: {integrity: sha512-GX+ysw4PBCz0PzosHDepZGANEuFCMLrnRTiEy9McGjmkCQYwRq4A/X786G/fjM/+OjsWSU1ZrY5qyARZmO/uwg==}
 
@@ -1795,9 +1789,6 @@ packages:
   gtoken@8.0.0:
     resolution: {integrity: sha512-+CqsMbHPiSTdtSO14O51eMNlrp9N79gmeqmXeouJOhfucAedHw9noVe/n5uJk3tbKE6a+6ZCQg3RPhVhHByAIw==}
     engines: {node: '>=18'}
-
-  guid-typescript@1.0.9:
-    resolution: {integrity: sha512-Y8T4vYhEfwJOTbouREvG+3XDsjr8E3kIr7uf+JZ0BYloFsttiHU0WfvANVsR7TxNUJa/WpCnw/Ino/p+DeBhBQ==}
 
   has-bigints@1.1.0:
     resolution: {integrity: sha512-R3pbpkcIqv2Pm3dUwgjclDRVmWpTJW2DcMzcIhEXEx1oh/CEMObMm3KLmRJOdvhM7o4uQBnwr8pzRK2sJWIqfg==}
@@ -2308,12 +2299,6 @@ packages:
   once@1.4.0:
     resolution: {integrity: sha512-lNaJgI+2Q5URQBkccEKHTQOPaXdUxnZZElQTZY0MFUAuaEqe1E+Nyvgdz/aIyNi6Z9MzO5dv1H8n58/GELp3+w==}
 
-  onnxruntime-common@1.23.0:
-    resolution: {integrity: sha512-Auz8S9D7vpF8ok7fzTobvD1XdQDftRf/S7pHmjeCr3Xdymi4z1C7zx4vnT6nnUjbpelZdGwda0BmWHCCTMKUTg==}
-
-  onnxruntime-web@1.23.0:
-    resolution: {integrity: sha512-w0bvC2RwDxphOUFF8jFGZ/dYw+duaX20jM6V4BIZJPCfK4QuCpB/pVREV+hjYbT3x4hyfa2ZbTaWx4e1Vot0fQ==}
-
   opencv.js@1.2.1:
     resolution: {integrity: sha512-+ji5Pk3eyz+RRSeZr2kLZNJpjsKoGyPJOjFWng7+Cuq9ylHakBqJMxDGlBW1+qdju3k8DadWOiHJ6JaF28UpKA==}
 
@@ -2365,9 +2350,6 @@ packages:
   picomatch@4.0.3:
     resolution: {integrity: sha512-5gTmgEY/sqK6gFXLIsQNH19lWb4ebPDLA4SdLP7dsWkIXHWlG66oPuVvXSGFPppYZz8ZDZq0dYYrbHfBCVUb1Q==}
     engines: {node: '>=12'}
-
-  platform@1.3.6:
-    resolution: {integrity: sha512-fnWVljUchTro6RiCFvCXBbNhJc2NijN7oIQxbwsyL0buWJPG85v81ehlHI9fXrJsMNgTofEoWIQeClKpgxFLrg==}
 
   possible-typed-array-names@1.1.0:
     resolution: {integrity: sha512-/+5VFTchJDoVj3bhoqi6UeymcD00DAwb1nJwamzPvHEszJ4FpF6SNNbUbOS8yI56qHzdV8eK0qEfOSiodkTdxg==}
@@ -4500,8 +4482,6 @@ snapshots:
       flatted: 3.3.3
       keyv: 4.5.4
 
-  flatbuffers@25.9.23: {}
-
   flatted@3.3.3: {}
 
   for-each@0.3.5:
@@ -4656,8 +4636,6 @@ snapshots:
       jws: 4.0.0
     transitivePeerDependencies:
       - supports-color
-
-  guid-typescript@1.0.9: {}
 
   has-bigints@1.1.0: {}
 
@@ -5147,17 +5125,6 @@ snapshots:
     dependencies:
       wrappy: 1.0.2
 
-  onnxruntime-common@1.23.0: {}
-
-  onnxruntime-web@1.23.0:
-    dependencies:
-      flatbuffers: 25.9.23
-      guid-typescript: 1.0.9
-      long: 5.3.2
-      onnxruntime-common: 1.23.0
-      platform: 1.3.6
-      protobufjs: 7.5.4
-
   opencv.js@1.2.1: {}
 
   optionator@0.9.4:
@@ -5205,8 +5172,6 @@ snapshots:
   picomatch@2.3.1: {}
 
   picomatch@4.0.3: {}
-
-  platform@1.3.6: {}
 
   possible-typed-array-names@1.1.0: {}
 

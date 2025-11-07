@@ -1,56 +1,36 @@
-// app/api/save-image/route.ts
 import { NextRequest, NextResponse } from 'next/server';
-import { existsSync } from 'fs';
-import { mkdir, writeFile } from 'fs/promises';
-import { join } from 'path';
+import fs from 'node:fs';
+import path from 'node:path';
 
-export async function POST(request: NextRequest) {
+export async function POST(req: NextRequest) {
   try {
-    const { image, filename } = await request.json();
+    const { image, filename } = await req.json() as { image: string; filename: string; };
 
     if (!image || !filename) {
-      return NextResponse.json(
-        { success: false, error: 'Missing image or filename' },
-        { status: 400 }
-      );
+      return NextResponse.json({ error: 'Missing image or filename' }, { status: 400 });
     }
 
-    // Define the save directory (public/captured_images)
-    const saveDir = join(process.cwd(), 'public', 'captured_images');
+    // Ensure we always write under /public
+    const publicDir = path.join(process.cwd(), 'public');
+    const safeRelPath = filename.replace(/^\/+/, ''); // strip leading slashes
+    const fullPath = path.join(publicDir, safeRelPath);
 
-    // Create directory if it doesn't exist
-    if (!existsSync(saveDir)) {
-      await mkdir(saveDir, { recursive: true });
-      console.log(`📁 Created directory: ${saveDir}`);
+    // Ensure directory exists (e.g., public/captured_images)
+    fs.mkdirSync(path.dirname(fullPath), { recursive: true });
+
+    // image is a data URL (e.g., 'data:image/jpeg;base64,...')
+    const base64 = image.split(';base64,').pop();
+    if (!base64) {
+      return NextResponse.json({ error: 'Invalid data URL' }, { status: 400 });
     }
 
-    // Extract base64 data from data URL
-    const base64Data = image.replace(/^data:image\/\w+;base64,/, '');
-    const buffer = Buffer.from(base64Data, 'base64');
+    fs.writeFileSync(fullPath, Buffer.from(base64, 'base64'));
 
-    // Save the file
-    const filePath = join(saveDir, filename);
-    await writeFile(filePath, buffer);
-
-    // Return relative path for web access
-    const relativePath = `/captured_images/${filename}`;
-
-    console.log(`✅ Image saved successfully: ${relativePath}`);
-
-    return NextResponse.json({
-      success: true,
-      path: relativePath,
-      filename: filename,
-      size: buffer.length,
-    });
-  } catch (error) {
-    console.error('❌ Error saving image:', error);
-    return NextResponse.json(
-      {
-        success: false,
-        error: error instanceof Error ? error.message : 'Failed to save image',
-      },
-      { status: 500 }
-    );
+    // Return public URL path for client display if needed
+    const publicUrl = '/' + safeRelPath.replace(/\\/g, '/');
+    return NextResponse.json({ ok: true, path: publicUrl });
+  } catch (e: any) {
+    console.error('save-image error:', e);
+    return NextResponse.json({ error: e?.message ?? 'Server error' }, { status: 500 });
   }
 }

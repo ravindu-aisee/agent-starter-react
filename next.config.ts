@@ -2,13 +2,13 @@ import type { NextConfig } from 'next';
 
 const nextConfig: NextConfig = {
   webpack: (config, { isServer }) => {
-    // Add support for ONNX files
+    // Add support for TFLite files
     config.module.rules.push({
-      test: /\.onnx$/,
+      test: /\.tflite$/,
       type: 'asset/resource',
     });
 
-    // ONNX Runtime Web requires some Node.js polyfills for the browser
+    // TensorFlow.js requires some Node.js polyfills for the browser
     if (!isServer) {
       config.resolve.fallback = {
         ...config.resolve.fallback,
@@ -29,6 +29,10 @@ const nextConfig: NextConfig = {
           {
             key: 'Cache-Control',
             value: 'public, max-age=31536000, immutable',
+          },
+          {
+            key: 'Content-Type',
+            value: 'application/octet-stream',
           },
         ],
       },
