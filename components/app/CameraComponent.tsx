@@ -30,6 +30,9 @@ export function CameraComponent() {
   const [plateDetections, setPlateDetections] = useState<Detection[]>([]);
   const [ocrResults, setOcrResults] = useState<string[]>([]);
   const [detectedBuses, setDetectedBuses] = useState<Map<number, string>>(new Map());
+  const [debugInfo, setDebugInfo] = useState<string>('');
+  const [frameRate, setFrameRate] = useState(0);
+  const [showDebug, setShowDebug] = useState(true); // Show debug by default
 
   // ---- refs / infra ----
   const webcamRef = useRef<Webcam>(null);
@@ -43,30 +46,71 @@ export function CameraComponent() {
   const announcedBusesRef = useRef<Set<string>>(new Set());
   const frameCountRef = useRef(0);
   const matchFoundRef = useRef(false);
-  const targetBusNumberRef = useRef<string>(''); // Global target bus number from user
+  const targetBusNumberRef = useRef<string>('');
 
-  // ---- constants ----
+  // Performance tracking
+  const lastFrameTimeRef = useRef(0);
+  const frameTimesRef = useRef<number[]>([]);
+  const adaptiveFrameSkip = useRef(2);
+  const performanceScores = useRef<number[]>([]);
+
+  // Preprocessing state for coordinate transformation
+  const preprocessStateRef = useRef<{
+    scale: number;
+    padX: number;
+    padY: number;
+  }>({ scale: 1, padX: 0, padY: 0 });
+
+  // ---------------------------------- constants ----------------------------------------
   const VALID_BUS_ROUTES = [
-    '382W','386','50','136','43M','34','110','84','117','36','190','83','502','972M','518','16','123','167','7','143','175','27','506','858','48','272','27A','34A',
+    '382W',
+    '386',
+    '50',
+    '136',
+    '43M',
+    '34',
+    '110',
+    '84',
+    '117',
+    '36',
+    '190',
+    '83',
+    '502',
+    '972M',
+    '518',
+    '16',
+    '123',
+    '167',
+    '7',
+    '143',
+    '175',
+    '27',
+    '506',
+    '858',
+    '48',
+    '272',
+    '27A',
+    '34A',
   ];
   const OBJECT_COOLDOWN_MS = 5000;
-  const isMobile = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent);
-  const PROCESS_EVERY_N_FRAMES = isMobile ? 3 : 2;
+  const isMobile = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(
+    navigator.userAgent
+  );
   const DETECTION_INTERVAL_MS = isMobile ? 150 : 100;
   const CLASS_NAMES = ['busnumber'];
   const ALLOWED = ['busnumber'];
   const INPUT_SIZE = 640;
-  const YOLO_CONF = 0.3;
+  const YOLO_CONF = isMobile ? 0.15 : 0.2; // Lower threshold for mobile
   const YOLO_IOU = 0.5;
 
-  // ---- LiveKit datachannel handler (mirrors first file’s behavior) ----
+  // --------------------------- LiveKit datachannel handler ---------------------------
   const { send } = useDataChannel((message) => {
     try {
       const data: DataChannelMessage = JSON.parse(new TextDecoder().decode(message.payload));
-      console.log('📨 Received data from backend:', data);
+      console.log('Received data from backend:', data);
 
       if (data.type === 'query') {
-        console.log('🎥 Opening camera for query:', data.bus_number);
+        console.log('Opening camera for query:', data.bus_number);
 
         // Reset all state for new query
         setShowCamera(true);
@@ -74,19 +118,19 @@ export function CameraComponent() {
         setDetectedBuses(new Map());
         setPlateDetections([]);
         setOcrResults([]);
+        setDebugInfo('');
 
         processingIdsRef.current.clear();
         processedObjectsRef.current.clear();
         announcedBusesRef.current.clear();
         frameCountRef.current = 0;
         matchFoundRef.current = false;
+        adaptiveFrameSkip.current = isMobile ? 3 : 2;
 
-        // Store the target bus number in ref for global access
-        targetBusNumberRef.current = data.bus_number || '';
         const normalizedTarget = normalizeBusNumber(data.bus_number);
-        console.log(`🎯 Target bus number: ${data.bus_number} → Normalized: ${normalizedTarget}`);
+        targetBusNumberRef.current = normalizedTarget || '';
+        console.log(`Target bus number: ${data.bus_number} → Normalized: ${normalizedTarget}`);
 
-        // Send the same “camera started…” response as the first file
         if (data.bus_number) {
           sendResponse(`Camera started - scanning for bus number ${data.bus_number}...`);
         } else {
@@ -94,57 +138,68 @@ export function CameraComponent() {
         }
       }
     } catch (error) {
-      console.error('❌ Failed to parse data channel message', error);
+      console.error('Failed to parse data channel message', error);
     }
   });
 
-  // ---- helpers: normalize / fuzzy validate ----
+  // ----------------------- helpers: normalize the bus number/ fuzzy validate ------------------------
   const normalizeBusNumber = useCallback((busNumber?: string): string => {
     if (!busNumber) return '';
     return busNumber.replace(/[^a-zA-Z0-9]/g, '').toUpperCase();
   }, []);
 
   const levenshteinDistance = (a: string, b: string): number => {
-    const m = a.length, n = b.length;
+    const m = a.length,
+      n = b.length;
     const dp = Array.from({ length: m + 1 }, (_, i) => new Array(n + 1).fill(0));
     for (let i = 0; i <= m; i++) dp[i][0] = i;
     for (let j = 0; j <= n; j++) dp[0][j] = j;
     for (let i = 1; i <= m; i++) {
       for (let j = 1; j <= n; j++) {
-        dp[i][j] = a[i - 1] === b[j - 1]
-          ? dp[i - 1][j - 1]
-          : Math.min(dp[i - 1][j - 1] + 1, dp[i][j - 1] + 1, dp[i - 1][j] + 1);
+        dp[i][j] =
+          a[i - 1] === b[j - 1]
+            ? dp[i - 1][j - 1]
+            : Math.min(dp[i - 1][j - 1] + 1, dp[i][j - 1] + 1, dp[i - 1][j] + 1);
       }
     }
     return dp[m][n];
   };
 
-  const findClosestValidRoute = useCallback((ocrTextRaw: string): string => {
-    const ocrText = normalizeBusNumber(ocrTextRaw);
-    if (!ocrText || ocrText === 'NONE') return 'None';
+  const findClosestValidRoute = useCallback(
+    (ocrTextRaw: string): string => {
+      const ocrText = normalizeBusNumber(ocrTextRaw);
+      if (!ocrText || ocrText === 'NONE') return 'None';
 
-    console.log(`🔍 Validating OCR result: "${ocrText}"`);
-    if (ocrText.length < 2) return 'None';
+      console.log(`Validating OCR result: "${ocrText}"`);
+      if (ocrText.length < 2) return 'None';
 
-    // exact
-    if (VALID_BUS_ROUTES.includes(ocrText)) return ocrText;
+      // exact match
+      if (VALID_BUS_ROUTES.includes(ocrText)) return ocrText;
 
-    // route contained in OCR (≥50% of OCR length)
-    for (const r of VALID_BUS_ROUTES) if (ocrText.includes(r) && r.length >= ocrText.length * 0.5) return r;
+      // route contained in OCR
+      for (const r of VALID_BUS_ROUTES)
+        if (ocrText.includes(r) && r.length >= ocrText.length * 0.5) return r;
 
-    // OCR contained in route (≥60% of route length)
-    for (const r of VALID_BUS_ROUTES) if (r.includes(ocrText) && ocrText.length >= r.length * 0.6) return r;
+      // OCR contained in route
+      for (const r of VALID_BUS_ROUTES)
+        if (r.includes(ocrText) && ocrText.length >= r.length * 0.6) return r;
 
-    // very close edit-distance (≤1) and length similar (≤1)
-    let best = 'None', bestD = Infinity;
-    for (const r of VALID_BUS_ROUTES) {
-      const d = levenshteinDistance(ocrText, r);
-      if (d <= 1 && Math.abs(ocrText.length - r.length) <= 1 && d < bestD) { best = r; bestD = d; }
-    }
-    return best !== 'None' ? best : 'None';
-  }, [VALID_BUS_ROUTES, normalizeBusNumber]);
+      // close edit distance
+      let best = 'None',
+        bestD = Infinity;
+      for (const r of VALID_BUS_ROUTES) {
+        const d = levenshteinDistance(ocrText, r);
+        if (d <= 1 && Math.abs(ocrText.length - r.length) <= 1 && d < bestD) {
+          best = r;
+          bestD = d;
+        }
+      }
+      return best !== 'None' ? best : 'None';
+    },
+    [normalizeBusNumber]
+  );
 
-  // ---- model init (same timing/UX as first file) ----
+  // ---------------------------------- model init -----------------------------------------
   useEffect(() => {
     if (showCamera && !modelLoaded && !modelRef.current) {
       (async () => {
@@ -157,23 +212,23 @@ export function CameraComponent() {
 
           setModelLoaded(true);
           setModelStatus('Model ready - detecting bus number plates');
-          console.log('✅ LiteRT model loaded successfully!');
+          console.log('LiteRT model loaded successfully!');
         } catch (e: any) {
           const errorMsg = `Init error: ${e?.message ?? e}`;
           setModelStatus(errorMsg);
-          console.error('❌ Model loading error:', errorMsg, e);
+          console.error('Model loading error:', errorMsg, e);
         }
       })();
     }
   }, [showCamera, modelLoaded]);
 
-  // ---- detection loop lifecycle ----
+  // ----------------------------------- detection loop lifecycle -----------------------------------
   useEffect(() => {
     if (showCamera && modelLoaded && modelRef.current) {
-      console.log('🚀 Starting detection loop…');
+      console.log('Starting detection loop…');
       startLoop();
       return () => {
-        console.log('🛑 Stopping detection loop…');
+        console.log('Stopping detection loop…');
         stopLoop();
       };
     } else {
@@ -197,39 +252,46 @@ export function CameraComponent() {
     processingIdsRef.current.clear();
   }, []);
 
-  // ---- responses / TTS (mirrors first file’s semantics) ----
-  const sendResponse = useCallback((result: string) => {
-    if (!send) {
-      console.error('❌ Data channel send function not available');
-      return;
-    }
-    const response: DataChannelMessage = { type: 'response', result };
-    try {
-      send(new TextEncoder().encode(JSON.stringify(response)), { reliable: true });
-    } catch (e) {
-      console.error('❌ Failed to send response:', e);
-    }
-  }, [send]);
+  // ---------------------------------- responses / TTS ----------------------------------
+  const sendResponse = useCallback(
+    (result: string) => {
+      if (!send) {
+        console.error('Data channel send function not available');
+        return;
+      }
+      const response: DataChannelMessage = { type: 'response', result };
+      try {
+        send(new TextEncoder().encode(JSON.stringify(response)), { reliable: true });
+      } catch (e) {
+        console.error('Failed to send response:', e);
+      }
+    },
+    [send]
+  );
 
   const clearAllStates = () => {
-    console.log('🧹 Clearing all states…');
+    console.log('Clearing all states…');
     setPlateDetections([]);
     setOcrResults([]);
     setDetectedBuses(new Map());
     setLastQuery(null);
+    setDebugInfo('');
     frameCountRef.current = 0;
     processingIdsRef.current.clear();
     processedObjectsRef.current.clear();
     announcedBusesRef.current.clear();
     matchFoundRef.current = false;
-    targetBusNumberRef.current = ''; // Clear target bus number
+    targetBusNumberRef.current = '';
+    frameTimesRef.current = [];
+    performanceScores.current = [];
+    adaptiveFrameSkip.current = isMobile ? 3 : 2;
     const c = canvasRef.current;
     if (c) c.getContext('2d')?.clearRect(0, 0, c.width, c.height);
   };
 
   const playTTSAnnouncement = async (busNumber: string): Promise<void> => {
     if (announcedBusesRef.current.has(busNumber)) {
-      console.log(`🔇 Skipping TTS for ${busNumber} - already announced`);
+      console.log(`Skipping TTS for ${busNumber} - already announced`);
       return;
     }
     try {
@@ -243,7 +305,7 @@ export function CameraComponent() {
       });
 
       if (!response.ok) {
-        console.error(`❌ TTS API error: ${response.statusText}`);
+        console.error(`TTS API error: ${response.statusText}`);
         announcedBusesRef.current.delete(busNumber);
         return;
       }
@@ -253,25 +315,23 @@ export function CameraComponent() {
       const audio = new Audio(audioUrl);
 
       audio.play().catch((err) => {
-        console.error('❌ Error playing TTS:', err);
+        console.error('Error playing TTS:', err);
         announcedBusesRef.current.delete(busNumber);
       });
 
-      // IMPORTANT: mirror first file – clean up after playback finishes
       audio.onended = () => {
         URL.revokeObjectURL(audioUrl);
-        console.log('🎵 TTS playback finished');
-        // Close & clear AFTER TTS completes to avoid race conditions
+        console.log(' TTS playback finished');
         setShowCamera(false);
         setTimeout(() => clearAllStates(), 300);
       };
     } catch (error) {
-      console.error('❌ TTS error:', error);
+      console.error('TTS error:', error);
       announcedBusesRef.current.delete(busNumber);
     }
   };
 
-  // ---- vision helpers ----
+  // ----------------------------- vision helpers -----------------------------
   const generateObjectId = useCallback((bbox: number[]): number => {
     const [x, y, w, h] = bbox;
     const gridSize = 100;
@@ -312,16 +372,21 @@ export function CameraComponent() {
       });
       if (response.ok) {
         const result = await response.json();
-        console.log(`💾 Image saved: ${result.path}`);
+        console.log(`Image saved: ${result.path}`);
       } else {
-        console.error('❌ Save image error:', response.statusText);
+        console.error('Save image error:', response.statusText);
       }
     } catch (error) {
-      console.error('❌ Save image network error:', error);
+      console.error('Save image network error:', error);
     }
   }
 
-  const annotateAndSaveImage = (imageData: string, text: string, confidence: number, filename: string) => {
+  const annotateAndSaveImage = (
+    imageData: string,
+    text: string,
+    confidence: number,
+    filename: string
+  ) => {
     const img = new Image();
     img.onload = () => {
       const canvas = document.createElement('canvas');
@@ -373,22 +438,53 @@ export function CameraComponent() {
       ctx.lineWidth = 4;
 
       // corners
-      ctx.beginPath(); ctx.moveTo(x, y + corner); ctx.lineTo(x, y); ctx.lineTo(x + corner, y); ctx.stroke();
-      ctx.beginPath(); ctx.moveTo(x + bw - corner, y); ctx.lineTo(x + bw, y); ctx.lineTo(x + bw, y + corner); ctx.stroke();
-      ctx.beginPath(); ctx.moveTo(x, y + bh - corner); ctx.lineTo(x, y + bh); ctx.lineTo(x + corner, y + bh); ctx.stroke();
-      ctx.beginPath(); ctx.moveTo(x + bw - corner, y + bh); ctx.lineTo(x + bw, y + bh); ctx.lineTo(x + bw, y + bh - corner); ctx.stroke();
+      ctx.beginPath();
+      ctx.moveTo(x, y + corner);
+      ctx.lineTo(x, y);
+      ctx.lineTo(x + corner, y);
+      ctx.stroke();
 
+      ctx.beginPath();
+      ctx.moveTo(x + bw - corner, y);
+      ctx.lineTo(x + bw, y);
+      ctx.lineTo(x + bw, y + corner);
+      ctx.stroke();
+
+      ctx.beginPath();
+      ctx.moveTo(x, y + bh - corner);
+      ctx.lineTo(x, y + bh);
+      ctx.lineTo(x + corner, y + bh);
+      ctx.stroke();
+
+      ctx.beginPath();
+      ctx.moveTo(x + bw - corner, y + bh);
+      ctx.lineTo(x + bw, y + bh);
+      ctx.lineTo(x + bw, y + bh - corner);
+      ctx.stroke();
+
+      // Label with coordinates
       const label = `${d.class_name ?? 'busnumber'} ${(d.confidence * 100).toFixed(1)}%`;
+      const coordLabel = `[${x.toFixed(0)},${y.toFixed(0)} ${bw.toFixed(0)}x${bh.toFixed(0)}]`;
+
       ctx.font = 'bold 16px Arial';
       const tm = ctx.measureText(label);
+      ctx.font = '12px monospace';
+      const tm2 = ctx.measureText(coordLabel);
+      const maxWidth = Math.max(tm.width, tm2.width);
+
       ctx.fillStyle = 'rgba(0,255,0,0.9)';
-      ctx.fillRect(x, Math.max(0, y - 24), tm.width + 12, 22);
+      ctx.fillRect(x, Math.max(0, y - 46), maxWidth + 12, 44);
       ctx.fillStyle = '#000';
-      ctx.fillText(label, x + 6, Math.max(16, y - 6));
+
+      ctx.font = 'bold 16px Arial';
+      ctx.fillText(label, x + 6, Math.max(16, y - 28));
+
+      ctx.font = '12px monospace';
+      ctx.fillText(coordLabel, x + 6, Math.max(30, y - 10));
     });
   }
 
-  // ---- OCR call (returns NORMALIZED text) ----
+  // --------------------------------------- OCR call ---------------------------------------
   async function runOCR(imgDataUrl: string): Promise<string> {
     const t = performanceMonitor.start(METRICS.OCR);
     try {
@@ -403,19 +499,19 @@ export function CameraComponent() {
       const result: OCRResult = await response.json();
       if (result.success && result.text) {
         const normalized = normalizeBusNumber(result.text);
-        console.log(`✅ OCR raw: "${result.text}" → normalized: "${normalized}"`);
+        console.log(`OCR raw: "${result.text}" → normalized: "${normalized}"`);
         return normalized || 'None';
       }
       return 'None';
     } catch (error) {
-      console.error('❌ OCR processing error:', error);
+      console.error('OCR processing error:', error);
       return 'None';
     } finally {
       performanceMonitor.end(t);
     }
   }
 
-  // ---- detection pipeline (now fully mirrors first file’s “found target → TTS → close/clear”) ----
+  // ------------------------------ Main detection pipeline ---------------------------------
   const runDetection = useCallback(async () => {
     const video = webcamRef.current?.video as HTMLVideoElement | undefined;
     const model = modelRef.current;
@@ -424,45 +520,122 @@ export function CameraComponent() {
     if (matchFoundRef.current) return;
 
     frameCountRef.current++;
-    if (frameCountRef.current % PROCESS_EVERY_N_FRAMES !== 0) return;
+
+    // Adaptive frame skipping
+    if (frameCountRef.current % adaptiveFrameSkip.current !== 0) return;
+
+    // Calculate FPS
+    const now = performance.now();
+    if (lastFrameTimeRef.current) {
+      const delta = now - lastFrameTimeRef.current;
+      frameTimesRef.current.push(delta);
+      if (frameTimesRef.current.length > 30) frameTimesRef.current.shift();
+
+      const avgDelta =
+        frameTimesRef.current.reduce((a, b) => a + b, 0) / frameTimesRef.current.length;
+      setFrameRate(Math.round(1000 / avgDelta));
+    }
+    lastFrameTimeRef.current = now;
 
     const pipelineTimer = performanceMonitor.start(METRICS.DETECTION_PIPELINE);
+
     try {
+      // Enhanced preprocessing with letterboxing
       const preId = performanceMonitor.start(METRICS.PREPROCESSING);
-      const inputTensor = await literTModelManager.preprocessImage(video, INPUT_SIZE);
+      const {
+        tensor: inputTensor,
+        scale,
+        padX,
+        padY,
+      } = await literTModelManager.preprocessImage(video, INPUT_SIZE);
+
+      // Store preprocessing state for coordinate transformation
+      preprocessStateRef.current = { scale, padX, padY };
+
       performanceMonitor.end(preId);
 
+      console.log(
+        `[Preprocess] Video: ${video.videoWidth}x${video.videoHeight}, Scale: ${scale.toFixed(3)}, Pad: ${padX},${padY}`
+      );
+
+      // Run inference
       const infId = performanceMonitor.start(METRICS.INFERENCE);
       const raw = await literTModelManager.runInference(model, inputTensor);
-      performanceMonitor.end(infId);
+      const inferenceTime = performanceMonitor.end(infId);
 
+      // Postprocess with proper coordinate transformation
       const postId = performanceMonitor.start(METRICS.POSTPROCESSING);
       const boxes = literTModelManager.processDetections(
         raw,
         video.videoWidth,
         video.videoHeight,
+        scale, // Scale for coordinate transformation
+        padX, // Padding X
+        padY, // Padding Y
         YOLO_CONF,
         YOLO_IOU,
         INPUT_SIZE,
         {
           classNames: CLASS_NAMES,
           allowedClassNames: ALLOWED,
-          minBoxArea: 16 * 16,
-          aspectRatioRange: [0.2, 5],
+          minBoxArea: isMobile ? 10 * 10 : 12 * 12, // Smaller minimum for mobile
+          aspectRatioRange: [0.15, 6], // More flexible aspect ratio
         }
       );
       performanceMonitor.end(postId);
+
+      const pipelineTime = performanceMonitor.end(pipelineTimer);
+
+      // // Update debug info
+      // setDebugInfo(`Device: ${isMobile ? 'Mobile' : 'Desktop'}
+      // Resolution: ${video.videoWidth}x${video.videoHeight}
+      // Scale: ${scale.toFixed(3)} | Pad: ${padX},${padY}
+      // Detections: ${boxes.length}
+      // Confidence: ${YOLO_CONF} | IOU: ${YOLO_IOU}
+      // Inference: ${inferenceTime.toFixed(1)}ms
+      // Pipeline: ${pipelineTime.toFixed(1)}ms
+      // FPS: ${frameRate} | Skip: ${adaptiveFrameSkip.current}
+      // Target: ${targetBusNumberRef.current || 'None'}`);
+
+      // Adaptive performance management
+      performanceScores.current.push(pipelineTime);
+      if (performanceScores.current.length > 10) {
+        performanceScores.current.shift();
+
+        const avgTime =
+          performanceScores.current.reduce((a, b) => a + b, 0) / performanceScores.current.length;
+
+        // Adjust frame skip for mobile performance
+        if (avgTime > 250 && adaptiveFrameSkip.current < 5) {
+          adaptiveFrameSkip.current++;
+          console.log(
+            `[Perf] Increasing frame skip to ${adaptiveFrameSkip.current} (avg: ${avgTime.toFixed(0)}ms)`
+          );
+        } else if (avgTime < 150 && adaptiveFrameSkip.current > 1) {
+          adaptiveFrameSkip.current--;
+          console.log(
+            `[Perf] Decreasing frame skip to ${adaptiveFrameSkip.current} (avg: ${avgTime.toFixed(0)}ms)`
+          );
+        }
+      }
 
       setPlateDetections(boxes);
       drawBoxes(boxes, video.videoWidth, video.videoHeight);
 
       if (!boxes.length) return;
 
-      // Use the global target bus number from ref
       const targetBusRaw = targetBusNumberRef.current;
       const targetBus = normalizeBusNumber(targetBusRaw);
-      console.log(`🎯 Target (raw): "${targetBusRaw}" | Normalized: "${targetBus}" | Detections: ${boxes.length}`);
 
+      // Log all detections with coordinates
+      boxes.forEach((det, idx) => {
+        const [x, y, w, h] = det.bbox;
+        console.log(
+          `[Det ${idx}] bbox=[${x.toFixed(0)}, ${y.toFixed(0)}, ${w.toFixed(0)}, ${h.toFixed(0)}] conf=${(det.confidence * 100).toFixed(1)}%`
+        );
+      });
+
+      // Process detections
       await Promise.all(
         boxes.map(async (det) => {
           if (matchFoundRef.current) return;
@@ -470,7 +643,6 @@ export function CameraComponent() {
           const objectId = generateObjectId(det.bbox);
           const now = Date.now();
 
-          // cooldown / in-flight guards
           const lastProcessedTime = processedObjectsRef.current.get(objectId);
           if (lastProcessedTime && now - lastProcessedTime < OBJECT_COOLDOWN_MS) return;
           if (processingIdsRef.current.has(objectId)) return;
@@ -478,65 +650,49 @@ export function CameraComponent() {
           processingIdsRef.current.add(objectId);
 
           try {
-            // Step 1: Crop the image (but don't save yet)
+            // Crop uses already-transformed coordinates
             const crop = cropWithPadding(video, det.bbox, 0.2);
             const ts = Date.now();
             const label = det.class_name ?? `cls${det.class_id}`;
 
-            // Step 2: Perform OCR first (this is the priority)
             const ocrStart = performance.now();
-            const ocrNorm = await runOCR(crop);                 // normalized
-            const validated = findClosestValidRoute(ocrNorm);   // validated against whitelist
+            const ocrNorm = await runOCR(crop);
+            const validated = findClosestValidRoute(ocrNorm);
             const ocrMs = performance.now() - ocrStart;
 
-            console.log(`⚡ OCR ${ocrMs.toFixed(1)}ms | raw="${ocrNorm}" | validated="${validated}"`);
+            console.log(`OCR ${ocrMs.toFixed(1)}ms | raw="${ocrNorm}" | validated="${validated}"`);
 
             processedObjectsRef.current.set(objectId, Date.now());
             processingIdsRef.current.delete(objectId);
 
             if (!validated || validated === 'None') return;
 
-            // Step 3: IMMEDIATELY check if it matches the target bus number (direct comparison)
             const isMatch = !!targetBus && validated === targetBus;
 
             console.log('='.repeat(60));
-            console.log(`🔎 COMPARISON CHECK: OCR="${validated}"  vs  TARGET="${targetBus}"  → ${isMatch ? '✅ MATCH' : '❌ NO MATCH'}`);
+            console.log(
+              `COMPARISON: OCR="${validated}" vs TARGET="${targetBus}" → ${isMatch ? '✅ MATCH' : '❌ NO MATCH'}`
+            );
             console.log('='.repeat(60));
 
             if (isMatch) {
-              // MATCH FOUND! Stop everything immediately
               matchFoundRef.current = true;
-              
-              console.log('🎯 MATCH FOUND! Stopping all processing and calling TTS...');
-              
-              // Stop the detection loop immediately
+              console.log('MATCH FOUND! Stopping all processing...');
               stopLoop();
-
-              // Send success response
-              sendResponse(`Bus number ${validated} detected successfully!`);
-
-              // Step 4: Play TTS announcement immediately (highest priority)
+              //sendResponse(`Bus number ${validated} detected successfully!`);
               await playTTSAnnouncement(validated);
 
-              // Step 5: Save images after TTS (optional, as camera will close)
               const filename = `captured_images/${label}_${objectId}_${ts}.jpg`;
               const annotated = `bus_${validated}_${objectId}_${ts}.jpg`;
-              
-              console.log('💾 Saving matched bus images...');
               saveImageAsync(crop, filename).catch(() => {});
               annotateAndSaveImage(crop, validated, det.confidence, annotated);
-
-              // Camera will be closed by TTS audio.onended callback
-              return; // Exit immediately, no further processing needed
+              return;
             }
 
-            // Only update UI and save non-matching detections if no match found yet
             setDetectedBuses((prev) => new Map(prev).set(objectId, validated));
             setOcrResults((prev) => [validated, ...prev].slice(0, 5));
-            
-            // For non-matching detections, send response and save
-            sendResponse(`Detected bus: ${validated}`);
-            
+            //sendResponse(`Detected bus: ${validated}`);
+
             const filename = `captured_images/${label}_${objectId}_${ts}.jpg`;
             const annotated = `bus_${validated}_${objectId}_${ts}.jpg`;
             saveImageAsync(crop, filename).catch(() => {});
@@ -553,38 +709,36 @@ export function CameraComponent() {
       performanceMonitor.end(pipelineTimer);
     }
   }, [
-    lastQuery,
-    PROCESS_EVERY_N_FRAMES,
     generateObjectId,
     sendResponse,
     stopLoop,
     normalizeBusNumber,
     findClosestValidRoute,
+    frameRate,
   ]);
 
-  // ---- UI ----
+  // ---------------------------------------- UI ----------------------------------------
   if (!showCamera) {
-    // small status chip like your first file
     return (
       <div
-        style={{
-          position: 'fixed',
-          bottom: 20,
-          right: 20,
-          padding: '12px 20px',
-          backgroundColor: modelLoaded ? 'rgba(0, 255, 0, 0.2)' : 'rgba(255, 165, 0, 0.2)',
-          border: modelLoaded ? '2px solid #00ff00' : '2px solid #ffa500',
-          borderRadius: 8,
-          color: 'white',
-          fontSize: '.85rem',
-          zIndex: 999,
-          boxShadow: '0 2px 10px rgba(0,0,0,0.3)',
-        }}
+      // style={{
+      //   position: 'fixed',
+      //   bottom: 20,
+      //   right: 20,
+      //   padding: '12px 20px',
+      //   backgroundColor: modelLoaded ? 'rgba(0, 255, 0, 0.2)' : 'rgba(255, 165, 0, 0.2)',
+      //   border: modelLoaded ? '2px solid #00ff00' : '2px solid #ffa500',
+      //   borderRadius: 8,
+      //   color: 'white',
+      //   fontSize: '.85rem',
+      //   zIndex: 999,
+      //   boxShadow: '0 2px 10px rgba(0,0,0,0.3)',
+      // }}
       >
-        <strong>🤖 YOLO Model:</strong> {modelLoaded ? '✅ Ready' : '⏳ Loading...'}
+        {/* <strong>YOLO Model:</strong> {modelLoaded ? '✅ Ready' : '⏳ Loading...'}
         {!modelLoaded && (
           <div style={{ fontSize: '.75rem', marginTop: 4, opacity: 0.8 }}>{modelStatus}</div>
-        )}
+        )} */}
       </div>
     );
   }
@@ -615,7 +769,7 @@ export function CameraComponent() {
             border: '2px solid #fa0',
           }}
         >
-          <div>🤖 {modelStatus}</div>
+          <div>{modelStatus}</div>
           <div style={{ fontSize: '.9rem', marginTop: 10, opacity: 0.8 }}>
             Please wait while the model is loading...
           </div>
@@ -641,15 +795,71 @@ export function CameraComponent() {
           style={{ width: '100%', height: 'auto', display: 'block' }}
           videoConstraints={{
             facingMode: 'environment',
-            width: { ideal: isMobile ? 1280 : 1920, max: 1920 },
-            height: { ideal: isMobile ? 720 : 1080, max: 1080 },
-            frameRate: { ideal: isMobile ? 24 : 30, max: 30 },
+            width: { ideal: isMobile ? 1920 : 1920, max: 3840 }, // Higher resolution for mobile
+            height: { ideal: isMobile ? 1080 : 1080, max: 2160 },
+            frameRate: { ideal: 30, max: 30 },
+            aspectRatio: 16 / 9,
           }}
         />
         <canvas
           ref={canvasRef}
-          style={{ position: 'absolute', inset: 0, width: '100%', height: '100%', pointerEvents: 'none' }}
+          style={{
+            position: 'absolute',
+            inset: 0,
+            width: '100%',
+            height: '100%',
+            pointerEvents: 'none',
+          }}
         />
+
+        {/* Debug Info Overlay */}
+        {/* {modelLoaded && debugInfo && showDebug && (
+            <div
+              style={{
+                position: 'absolute',
+                top: 10,
+                left: 10,
+                background: 'rgba(0,0,0,0.85)',
+                color: '#0f0',
+                padding: '10px 12px',
+                borderRadius: 6,
+                fontSize: isMobile ? '0.65rem' : '0.7rem',
+                fontFamily: 'monospace',
+                maxWidth: isMobile ? '90%' : 280,
+                whiteSpace: 'pre-line',
+                lineHeight: 1.4,
+                border: '1px solid #0f0',
+                zIndex: 10,
+              }}
+            >
+              <strong>Debug:</strong>
+              <br />
+              {debugInfo}
+            </div>
+          )} */}
+
+        {/* Debug Toggle Button */}
+        {/* {modelLoaded && (
+            <button
+              onClick={() => setShowDebug(!showDebug)}
+              style={{
+                position: 'absolute',
+                top: 10,
+                right: 10,
+                background: showDebug ? 'rgba(0,255,0,0.3)' : 'rgba(255,0,0,0.3)',
+                color: 'white',
+                border: showDebug ? '1px solid #0f0' : '1px solid #f00',
+                borderRadius: 6,
+                padding: '8px 12px',
+                fontSize: '0.75rem',
+                cursor: 'pointer',
+                zIndex: 10,
+                fontWeight: 'bold',
+              }}
+            >
+              {showDebug ? '🔧 ON' : '🔧 OFF'}
+            </button>
+          )} */}
       </div>
 
       <div
@@ -663,17 +873,18 @@ export function CameraComponent() {
           width: '90%',
         }}
       >
-        <strong>Model:</strong> {modelLoaded ? '✅ Ready' : '⏳ Loading…'}
+        <strong>Model:</strong> {modelLoaded ? 'Loaded Successfully' : 'Loading…'}
         <br />
         <strong>Detection:</strong>{' '}
-        {plateDetections.length ? `🎯 ${plateDetections.length} plate(s)` : '🔍 Scanning…'}
+        {plateDetections.length ? ` ${plateDetections.length} plate(s)` : 'Scanning…'}
         <br />
         <strong>Detected Buses:</strong>{' '}
         {detectedBuses.size ? Array.from(detectedBuses.values()).join(', ') : 'None yet'}
         {lastQuery?.bus_number && (
           <>
             <br />
-            <strong>Target Bus:</strong> {lastQuery.bus_number} (Normalized: {normalizeBusNumber(lastQuery.bus_number)})
+            <strong>Target Bus:</strong> {lastQuery.bus_number} (Normalized:{' '}
+            {normalizeBusNumber(lastQuery.bus_number)})
           </>
         )}
       </div>

@@ -1,12 +1,6 @@
 /**
- * LiteRT Model Loader with WebGPU/WASM Acceleration
- * Optimized for mobile web browsers
- *
- * - Uses @litertjs/core for cloud-native LiteRT inference
- * - Supports WebGPU (desktop) and WASM with XNNPack (mobile)
- * - Efficient NCHW input format: [1, 3, 640, 640]
- * - Proper tensor lifecycle management
- * - Background-safe: no globals leaked; caller owns the loop timing
+ * Enhanced LiteRT Model Loader with Multi-Scale Detection
+ * Optimized for mobile web browsers with better scale handling
  */
 import { Tensor, loadAndCompile, loadLiteRt } from '@litertjs/core';
 
@@ -26,13 +20,13 @@ export interface Detection {
 }
 
 export interface PostprocessOpts {
-  confThreshold?: number; // default 0.25
-  iouThreshold?: number; // default 0.45
-  inputSize?: number; // default 640
-  classNames?: string[]; // e.g., ['busnumber']
-  allowedClassNames?: string[]; // e.g., ['busnumber']
-  minBoxArea?: number; // e.g., 12*12
-  aspectRatioRange?: [number, number]; // e.g., [0.3, 4]
+  confThreshold?: number;
+  iouThreshold?: number;
+  inputSize?: number;
+  classNames?: string[];
+  allowedClassNames?: string[];
+  minBoxArea?: number;
+  aspectRatioRange?: [number, number];
 }
 
 class LiteRTModelManager {
@@ -44,7 +38,6 @@ class LiteRTModelManager {
   async initialize(): Promise<void> {
     if (this.isInitialized) return;
 
-    // Detect mobile device
     this.isMobile = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(
       navigator.userAgent
     );
@@ -52,8 +45,6 @@ class LiteRTModelManager {
     console.log('[LiteRT] Initializing... Mobile:', this.isMobile);
 
     try {
-      // Load LiteRT wasm files - following exact doc pattern
-      // Host LiteRT's Wasm files on your server
       await loadLiteRt('/litert-wasm/');
       console.log('[LiteRT] WASM loaded successfully');
     } catch (error) {
@@ -61,7 +52,6 @@ class LiteRTModelManager {
       throw new Error(`LiteRT WASM loading failed: ${error}`);
     }
 
-    // Probe WebGPU support (typically desktop only)
     this.supportsWebGPU = false;
     if ('gpu' in navigator && !this.isMobile) {
       try {
@@ -83,8 +73,6 @@ class LiteRTModelManager {
   }
 
   getAccelerator(): Accelerator {
-    // Use WASM with XNNPack on mobile for best performance
-    // Use WebGPU on desktop if available
     return this.isMobile ? 'wasm' : this.supportsWebGPU ? 'webgpu' : 'wasm';
   }
 
@@ -103,24 +91,12 @@ class LiteRTModelManager {
     try {
       console.log(`[LiteRT] Loading model from ${modelPath} with ${accelerator}...`);
 
-      // Load the model hosted from your server - following exact doc pattern
       const model = await loadAndCompile(modelPath, {
-        accelerator: accelerator, // 'webgpu' or 'wasm' for XNNPack CPU inference
+        accelerator: accelerator,
       });
 
       const loadTime = performance.now() - t0;
       console.log(`[LiteRT] Model loaded in ${loadTime.toFixed(0)}ms using ${accelerator}`);
-      console.log('[LiteRT] Model type:', typeof model);
-      console.log('[LiteRT] Model structure:', model);
-      console.log('[LiteRT] Is function:', typeof model === 'function');
-
-      // CompiledModel should be callable as a function
-      if (typeof model !== 'function' && model) {
-        console.log(
-          '[LiteRT] Available methods:',
-          Object.getOwnPropertyNames(Object.getPrototypeOf(model))
-        );
-      }
 
       this.modelCache.set(modelPath, { model, loadTime, accelerator });
       return model;
@@ -131,227 +107,202 @@ class LiteRTModelManager {
   }
 
   /**
-   * Preprocess video frame -> Float32 NCHW [1,3,640,640] in [0,1] range
-   * Following @litertjs/core documentation pattern exactly
+   * Enhanced preprocessing with better aspect ratio handling
+   * Uses letterboxing to preserve aspect ratio
    */
-  async preprocessImage(videoElement: HTMLVideoElement, targetSize = 640): Promise<Tensor> {
-    const H = targetSize,
-      W = targetSize,
-      C = 3;
+  async preprocessImage(
+    videoElement: HTMLVideoElement, 
+    targetSize = 640
+  ): Promise<{ tensor: Tensor; scale: number; padX: number; padY: number }> {
+    const srcW = videoElement.videoWidth;
+    const srcH = videoElement.videoHeight;
+    
+    // Calculate scale to fit image in targetSize square while preserving aspect ratio
+    const scale = Math.min(targetSize / srcW, targetSize / srcH);
+    const scaledW = Math.round(srcW * scale);
+    const scaledH = Math.round(srcH * scale);
+    
+    // Calculate padding to center the image
+    const padX = Math.floor((targetSize - scaledW) / 2);
+    const padY = Math.floor((targetSize - scaledH) / 2);
 
-    // Use OffscreenCanvas on mobile for better performance (if supported)
-    let imageData: ImageData;
+    console.log(`[LiteRT] Preprocessing: ${srcW}x${srcH} -> ${scaledW}x${scaledH} (scale: ${scale.toFixed(3)}, pad: ${padX},${padY})`);
 
-    if (typeof OffscreenCanvas !== 'undefined' && this.isMobile) {
-      try {
-        const offscreen = new OffscreenCanvas(W, H);
-        const ctx = offscreen.getContext('2d');
-        if (ctx) {
-          ctx.drawImage(videoElement, 0, 0, W, H);
-          imageData = ctx.getImageData(0, 0, W, H);
-        } else {
-          throw new Error('OffscreenCanvas 2D context not available');
-        }
-      } catch {
-        // Fallback to regular canvas
-        imageData = this.getImageDataFromCanvas(videoElement, W, H);
-      }
-    } else {
-      imageData = this.getImageDataFromCanvas(videoElement, W, H);
-    }
-
-    const { data } = imageData; // Uint8ClampedArray RGBA
-    const planeSize = H * W; // 640 * 640 = 409,600
-    const totalPixels = H * W; // 409,600
-    const expectedLen = totalPixels * C; // 409,600 * 3 = 1,228,800
-
-    console.log('[LiteRT] Creating Float32Array with length:', expectedLen);
-
-    // Create Float32Array for image data
-    const image = new Float32Array(expectedLen);
-
-    // Convert RGBA -> CHW (float32 0..1)
-    for (let c = 0; c < C; c++) {
-      for (let i = 0; i < totalPixels; i++) {
-        const rgbaIndex = i * 4;
-        image[c * planeSize + i] = data[rgbaIndex + c] / 255.0;
-      }
-    }
-
-    console.log(
-      '[LiteRT] Image array created, length:',
-      image.length,
-      'shape: [1,',
-      C,
-      ',',
-      H,
-      ',',
-      W,
-      ']'
-    );
-
-    // Following exact doc pattern: create Tensor then moveTo device
-    const accelerator = this.getAccelerator();
-    const inputTensor = await new Tensor(image, /* shape */ [1, C, H, W]).moveTo(accelerator);
-
-    return inputTensor;
-  }
-
-  private getImageDataFromCanvas(videoElement: HTMLVideoElement, W: number, H: number): ImageData {
+    // Create canvas with letterboxing
     const canvas = document.createElement('canvas');
-    canvas.width = W;
-    canvas.height = H;
-    const ctx = canvas.getContext('2d', { willReadFrequently: true });
+    canvas.width = targetSize;
+    canvas.height = targetSize;
+    const ctx = canvas.getContext('2d', { 
+      willReadFrequently: true,
+      alpha: false 
+    });
+    
     if (!ctx) throw new Error('Canvas 2D context not available');
 
-    ctx.drawImage(videoElement, 0, 0, W, H);
-    return ctx.getImageData(0, 0, W, H);
+    // Fill with gray background (114/255 = 0.447 - standard YOLO padding)
+    ctx.fillStyle = '#727272';
+    ctx.fillRect(0, 0, targetSize, targetSize);
+
+    // Draw scaled image centered
+    ctx.drawImage(videoElement, padX, padY, scaledW, scaledH);
+
+    const imageData = ctx.getImageData(0, 0, targetSize, targetSize);
+    const { data } = imageData;
+
+    // Convert to CHW format normalized to [0,1]
+    const C = 3;
+    const planeSize = targetSize * targetSize;
+    const image = new Float32Array(planeSize * C);
+
+    for (let c = 0; c < C; c++) {
+      for (let i = 0; i < planeSize; i++) {
+        image[c * planeSize + i] = data[i * 4 + c] / 255.0;
+      }
+    }
+
+    const accelerator = this.getAccelerator();
+    const inputTensor = await new Tensor(image, [1, C, targetSize, targetSize]).moveTo(accelerator);
+
+    return { tensor: inputTensor, scale, padX, padY };
   }
 
   /**
-   * Run inference following @litertjs/core documentation exactly
-   * Returns first output as Float32Array with proper cleanup
+   * Multi-scale preprocessing for better detection at various distances
    */
+  async preprocessMultiScale(
+    videoElement: HTMLVideoElement,
+    sizes: number[] = [640, 800, 960]
+  ): Promise<Array<{ tensor: Tensor; scale: number; padX: number; padY: number; size: number }>> {
+    const results = [];
+    
+    for (const size of sizes) {
+      const result = await this.preprocessImage(videoElement, size);
+      results.push({ ...result, size });
+    }
+    
+    return results;
+  }
+
   async runInference(model: any, inputTensor: Tensor): Promise<Float32Array> {
     try {
       console.log('[LiteRT] Running inference...');
 
-      // Run the model - CompiledModel should be callable as function per docs
       let outputs: any;
 
       if (typeof model === 'function') {
-        // Direct function call as per docs: model(inputTensor)
-        console.log('[LiteRT] Calling model as function');
         outputs = model(inputTensor);
       } else if (model && typeof (model as any).run === 'function') {
-        // Fallback: try run method
-        console.log('[LiteRT] Calling model.run()');
         outputs = (model as any).run([inputTensor]);
       } else {
-        // Try to call it anyway - it might be callable but not show as function
-        console.log('[LiteRT] Attempting direct call despite type check');
         try {
           outputs = model(inputTensor);
         } catch (e) {
-          console.error('[LiteRT] Model object structure:', model);
-          console.error('[LiteRT] Model prototype:', Object.getPrototypeOf(model));
           throw new Error(`Model is not callable. Type: ${typeof model}, Error: ${e}`);
         }
       }
 
-      console.log('[LiteRT] Inference complete, outputs:', outputs);
-
-      // Clean up input tensor immediately after inference
+      // Clean up input tensor
       inputTensor.delete();
 
-      // Get output tensors as array
       const outList: any[] = Array.isArray(outputs) ? outputs : [outputs];
 
       if (outList.length === 0) {
         throw new Error('Model returned no outputs');
       }
 
-      console.log('[LiteRT] Moving output to CPU...');
-
-      // Move first output to CPU (wasm) to read it
       const outputTensorCpu = await outList[0].moveTo('wasm');
       const outputData = outputTensorCpu.toTypedArray() as Float32Array;
 
-      console.log('[LiteRT] Output data length:', outputData.length);
+      console.log('[LiteRT] Output shape inferred:', this.inferOutputShape(outputData));
 
-      // Clean up output tensor
       outputTensorCpu.delete();
 
       return outputData;
     } catch (error) {
-      // Make sure to clean up tensor even if error occurs
       try {
         inputTensor.delete();
-      } catch (e) {
-        // Tensor already deleted
-      }
+      } catch (e) {}
       console.error('[LiteRT] Inference error:', error);
       throw new Error(`Inference failed: ${error}`);
     }
   }
 
   /**
-   * Postprocess a YOLO-style output vector into boxes
-   * NOTE: If your exported graph emits a different layout, adjust here.
+   * Infer output shape from data length
+   */
+  private inferOutputShape(data: Float32Array): string {
+    const len = data.length;
+    
+    // Common YOLO11 output shapes
+    const possibleShapes = [
+      { anchors: 8400, attrs: 6, desc: '[1, 6, 8400] - YOLO11 standard' },
+      { anchors: 8400, attrs: 5, desc: '[1, 5, 8400] - no objectness' },
+      { anchors: 10647, attrs: 6, desc: '[1, 6, 10647] - larger stride' },
+      { anchors: 25200, attrs: 6, desc: '[1, 6, 25200] - high res' },
+    ];
+
+    for (const shape of possibleShapes) {
+      if (len === shape.anchors * shape.attrs) {
+        return shape.desc;
+      }
+    }
+
+    return `Unknown: ${len} values`;
+  }
+
+  /**
+   * Enhanced detection processing with better coordinate transformation
    */
   processDetections(
     outputData: Float32Array,
     videoWidth: number,
     videoHeight: number,
+    scale: number,
+    padX: number,
+    padY: number,
     confThreshold = 0.25,
     iouThreshold = 0.45,
     inputSize = 640,
     opts: PostprocessOpts = {}
   ): Detection[] {
     const {
-      classNames = ['busnumber'], // <— put your training labels here
-      allowedClassNames = ['busnumber'], // <— we only keep these
+      classNames = ['busnumber'],
+      allowedClassNames = ['busnumber'],
       minBoxArea = 12 * 12,
       aspectRatioRange = [0.25, 4],
     } = opts;
 
     const total = outputData.length;
 
-    // Try common layouts; choose best match
-    // Layout A: [numBoxes, 5+numClasses]  (cx,cy,w,h,obj, c0..cK)
-    // Layout B: [numBoxes, 4+numClasses]  (cx,cy,w,h, c0..cK)           // no objectness
-    // Layout C: [5+numClasses, numBoxes]  (channel-first)
-    // Layout D: [4+numClasses, numBoxes]
-    const guess = (numAttr: number, numBoxes: number, transposed: boolean) =>
-      numAttr * numBoxes === total ? { numAttr, numBoxes, transposed } : null;
+    // Determine output format
+    let numBoxes = 8400; // Default for YOLO11
+    let numAttr = Math.floor(total / numBoxes);
+    let transposed = false;
 
-    const candidates = [
-      guess(6, 8400, false),
-      guess(5, 8400, false),
-      guess(6, 8400, true),
-      guess(5, 8400, true),
-    ].filter(Boolean) as Array<{ numAttr: number; numBoxes: number; transposed: boolean }>;
-
-    let picked = candidates[0];
-    if (!picked) {
-      // Fallback: assume [8400, N]
-      const numBoxes = 8400;
-      const numAttr = Math.floor(total / numBoxes);
-      picked = { numAttr, numBoxes, transposed: false };
+    // Try to match known formats
+    if (total === 8400 * 6) {
+      numBoxes = 8400;
+      numAttr = 6;
+      transposed = false; // [1, 6, 8400]
+    } else if (total === 6 * 8400) {
+      numBoxes = 8400;
+      numAttr = 6;
+      transposed = true; // [1, 8400, 6]
     }
-    const { numAttr, numBoxes, transposed } = picked;
 
-    // Identify if we have objectness and how many classes
-    // If numAttr > 6 => 5 geom + obj + classes, or 4 geom + classes + maybe no obj
-    // We’ll assume:
-    //   with obj:   5 + numClasses
-    //   w/o  obj:   4 + numClasses
-    let hasObj = false;
-    let numClasses = 0;
-    if (numAttr >= 6) {
-      // Try “with obj” first
-      numClasses = numAttr - 5 - 0; // (cx,cy,w,h,obj,...classes)
-      hasObj = true;
-      if (numClasses <= 0) {
-        // then try “no obj”
-        numClasses = numAttr - 4;
-        hasObj = false;
-      }
-    } else if (numAttr === 5) {
-      // Could be 4+(1 class) or 5(without classes - unlikely)
-      numClasses = 1; // minimal
-      hasObj = false;
-    } else {
-      // Very custom heads; bail out conservatively
-      numClasses = Math.max(1, numAttr - 4);
-      hasObj = numAttr > 4 + numClasses;
-    }
+    console.log(`[LiteRT] Processing ${numBoxes} boxes with ${numAttr} attributes (transposed: ${transposed})`);
+
+    // Determine if we have objectness
+    const hasObj = numAttr > 5;
+    const numClasses = hasObj ? numAttr - 5 : numAttr - 4;
 
     const dets: Detection[] = [];
+
     const attrAt = (i: number, attrIndex: number) =>
       transposed ? outputData[i * numAttr + attrIndex] : outputData[attrIndex * numBoxes + i];
 
     for (let i = 0; i < numBoxes; i++) {
+      // Get box coordinates (in model input space)
       const cx = attrAt(i, 0);
       const cy = attrAt(i, 1);
       const w = attrAt(i, 2);
@@ -359,7 +310,7 @@ class LiteRTModelManager {
 
       const obj = hasObj ? attrAt(i, 4) : 1.0;
 
-      // class scores start index
+      // Get class scores
       const classStart = hasObj ? 5 : 4;
       let bestClass = 0;
       let bestProb = numClasses > 0 ? attrAt(i, classStart) : 1.0;
@@ -375,25 +326,36 @@ class LiteRTModelManager {
       const score = obj * bestProb;
       if (score < confThreshold) continue;
 
-      // Filter by allowed classes
+      // Filter by class
       const name = classNames[bestClass] ?? `${bestClass}`;
       if (allowedClassNames.length && !allowedClassNames.includes(name)) continue;
 
-      // Box to video coords
-      const x = ((cx - w / 2) * videoWidth) / inputSize;
-      const y = ((cy - h / 2) * videoHeight) / inputSize;
-      const ww = (w * videoWidth) / inputSize;
-      const hh = (h * videoHeight) / inputSize;
+      // Transform coordinates from model space to original image space
+      // 1. Remove padding
+      const x_model = cx - w / 2;
+      const y_model = cy - h / 2;
+      
+      const x_unpadded = x_model - padX;
+      const y_unpadded = y_model - padY;
+      
+      // 2. Scale back to original size
+      const x_orig = x_unpadded / scale;
+      const y_orig = y_unpadded / scale;
+      const w_orig = w / scale;
+      const h_orig = h / scale;
 
-      const bx = Math.max(0, x);
-      const by = Math.max(0, y);
-      const bw = Math.min(videoWidth - bx, ww);
-      const bh = Math.min(videoHeight - by, hh);
+      // Clip to video bounds
+      const bx = Math.max(0, x_orig);
+      const by = Math.max(0, y_orig);
+      const bw = Math.min(videoWidth - bx, w_orig);
+      const bh = Math.min(videoHeight - by, h_orig);
+
       if (bw <= 0 || bh <= 0) continue;
 
-      // Extra heuristics to reduce noise
+      // Quality filters
       const area = bw * bh;
       const ar = bw / Math.max(1, bh);
+      
       if (area < minBoxArea) continue;
       if (ar < aspectRatioRange[0] || ar > aspectRatioRange[1]) continue;
 
@@ -430,10 +392,8 @@ class LiteRTModelManager {
     const [ax, ay, aw, ah] = a;
     const [bx, by, bw, bh] = b;
 
-    const ax2 = ax + aw,
-      ay2 = ay + ah;
-    const bx2 = bx + bw,
-      by2 = by + bh;
+    const ax2 = ax + aw, ay2 = ay + ah;
+    const bx2 = bx + bw, by2 = by + bh;
 
     const iw = Math.max(0, Math.min(ax2, bx2) - Math.max(ax, bx));
     const ih = Math.max(0, Math.min(ay2, by2) - Math.max(ay, by));

@@ -13,7 +13,7 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    console.log(`🔊 TTS Request: "${text}"`);
+    console.log(`TTS Request: "${text}"`);
 
     // Import Google Cloud TTS (only on server-side)
     const textToSpeech = require('@google-cloud/text-to-speech');
@@ -21,7 +21,7 @@ export async function POST(request: NextRequest) {
     // Use the same credentials as OCR (vision_ocr.json)
     const credentialsPath = join(process.cwd(), 'vision_ocr.json');
 
-    console.log(`📁 Using credentials from: ${credentialsPath}`);
+    console.log(`Using credentials from: ${credentialsPath}`);
 
     const client = new textToSpeech.TextToSpeechClient({
       keyFilename: credentialsPath,
@@ -36,7 +36,7 @@ export async function POST(request: NextRequest) {
       audioConfig: { audioEncoding: 'MP3' },
     };
 
-    console.log('📞 Calling Google Cloud TTS API...');
+    console.log('Calling Google Cloud TTS API...');
 
     // Performs the text-to-speech request
     const [response] = await client.synthesizeSpeech(ttsRequest);
@@ -45,7 +45,7 @@ export async function POST(request: NextRequest) {
       throw new Error('No audio content received from TTS API');
     }
 
-    console.log(`✅ TTS audio generated successfully (${response.audioContent.length} bytes)`);
+    console.log(`TTS audio generated successfully (${response.audioContent.length} bytes)`);
 
     // Return the audio content as MP3
     return new NextResponse(response.audioContent, {
@@ -56,7 +56,7 @@ export async function POST(request: NextRequest) {
       },
     });
   } catch (error: any) {
-    console.error('❌ TTS Error Details:', {
+    console.error('TTS Error Details:', {
       message: error?.message,
       code: error?.code,
       details: error?.details,
