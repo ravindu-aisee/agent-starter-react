@@ -5,6 +5,7 @@ import type { AppConfig } from '@/app-config';
 import { SessionProvider } from '@/components/app/session-provider';
 import { ViewController } from '@/components/app/view-controller';
 import { Toaster } from '@/components/livekit/toaster';
+import { CameraComponent } from '@/components/app/CameraComponent';
 
 interface AppProps {
   appConfig: AppConfig;
@@ -19,6 +20,7 @@ export function App({ appConfig }: AppProps) {
       <StartAudio label="Start Audio" />
       <RoomAudioRenderer />
       <Toaster />
+      <CameraComponent /> {/* <-- ADD THE COMPONENT HERE */}
     </SessionProvider>
   );
 }
