@@ -91,6 +91,7 @@ export function CameraComponent() {
     '272',
     '27A',
     '34A',
+    '14',
   ];
   const OBJECT_COOLDOWN_MS = 5000;
   const isMobile = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(
@@ -735,7 +736,7 @@ export function CameraComponent() {
       //   boxShadow: '0 2px 10px rgba(0,0,0,0.3)',
       // }}
       >
-        {/* <strong>YOLO Model:</strong> {modelLoaded ? '✅ Ready' : '⏳ Loading...'}
+        {/* <strong>YOLO Model:</strong> {modelLoaded ? 'Ready' : 'Loading...'}
         {!modelLoaded && (
           <div style={{ fontSize: '.75rem', marginTop: 4, opacity: 0.8 }}>{modelStatus}</div>
         )} */}
@@ -811,55 +812,6 @@ export function CameraComponent() {
             pointerEvents: 'none',
           }}
         />
-
-        {/* Debug Info Overlay */}
-        {/* {modelLoaded && debugInfo && showDebug && (
-            <div
-              style={{
-                position: 'absolute',
-                top: 10,
-                left: 10,
-                background: 'rgba(0,0,0,0.85)',
-                color: '#0f0',
-                padding: '10px 12px',
-                borderRadius: 6,
-                fontSize: isMobile ? '0.65rem' : '0.7rem',
-                fontFamily: 'monospace',
-                maxWidth: isMobile ? '90%' : 280,
-                whiteSpace: 'pre-line',
-                lineHeight: 1.4,
-                border: '1px solid #0f0',
-                zIndex: 10,
-              }}
-            >
-              <strong>Debug:</strong>
-              <br />
-              {debugInfo}
-            </div>
-          )} */}
-
-        {/* Debug Toggle Button */}
-        {/* {modelLoaded && (
-            <button
-              onClick={() => setShowDebug(!showDebug)}
-              style={{
-                position: 'absolute',
-                top: 10,
-                right: 10,
-                background: showDebug ? 'rgba(0,255,0,0.3)' : 'rgba(255,0,0,0.3)',
-                color: 'white',
-                border: showDebug ? '1px solid #0f0' : '1px solid #f00',
-                borderRadius: 6,
-                padding: '8px 12px',
-                fontSize: '0.75rem',
-                cursor: 'pointer',
-                zIndex: 10,
-                fontWeight: 'bold',
-              }}
-            >
-              {showDebug ? '🔧 ON' : '🔧 OFF'}
-            </button>
-          )} */}
       </div>
 
       <div

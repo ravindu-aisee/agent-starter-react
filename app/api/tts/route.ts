@@ -18,13 +18,13 @@ export async function POST(request: NextRequest) {
     // Import Google Cloud TTS (only on server-side)
     const textToSpeech = require('@google-cloud/text-to-speech');
 
-    // Use the same credentials as OCR (vision_ocr.json)
-    const credentialsPath = join(process.cwd(), 'vision_ocr.json');
-
-    console.log(`Using credentials from: ${credentialsPath}`);
-
+    // Use credentials from environment variables
     const client = new textToSpeech.TextToSpeechClient({
-      keyFilename: credentialsPath,
+      credentials: {
+        client_email: process.env.VISION_OCR_CLIENT_EMAIL,
+        private_key: process.env.VISION_OCR_PRIVATE_KEY?.replace(/\\n/g, '\n'),
+      },
+      projectId: process.env.VISION_OCR_PROJECT_ID,
     });
 
     // Construct the request
@@ -71,7 +71,7 @@ export async function POST(request: NextRequest) {
       errorMessage = 'Text-to-Speech API not enabled. Please enable it in Google Cloud Console.';
       statusCode = 403;
     } else if (error?.message?.includes('API key not valid')) {
-      errorMessage = 'Invalid API credentials. Please check vision_ocr.json file.';
+      errorMessage = 'Invalid API credentials. Please check your environment variables.';
       statusCode = 401;
     }
 
