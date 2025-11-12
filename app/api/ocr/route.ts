@@ -25,14 +25,14 @@ export async function POST(request: NextRequest) {
     // Convert base64 to buffer
     const imageBuffer = Buffer.from(base64Image, 'base64');
 
-    console.log('🔍 Starting OCR text detection...');
+    console.log('Starting OCR text detection...');
 
     // Perform text detection
     const [result] = await client.textDetection(imageBuffer);
     const detections = result.textAnnotations;
 
     if (!detections || detections.length === 0) {
-      console.log('⚠️ No text detected in image');
+      console.log(' No text detected in image');
       return NextResponse.json({
         success: true,
         text: '',
@@ -46,11 +46,11 @@ export async function POST(request: NextRequest) {
 
     // First detection contains all text
     const fullText = detections[0]?.description || '';
-    console.log('📄 Full Text:', fullText);
+    console.log('Full Text:', fullText);
     console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
 
     // Individual word detections
-    console.log('📝 Individual Words:');
+    console.log('Individual Words:');
     detections.slice(1).forEach((text, index) => {
       console.log(`  ${index + 1}. "${text.description}"`);
     });
