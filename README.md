@@ -1,74 +1,103 @@
-# Agent Starter for React
+# Track Bus LiveKit Agent Starter (React)
 
-This is a starter template for [LiveKit Agents](https://docs.livekit.io/agents) that provides a simple voice interface using the [LiveKit JavaScript SDK](https://github.com/livekit/client-sdk-js). It supports [voice](https://docs.livekit.io/agents/start/voice-ai), [transcriptions](https://docs.livekit.io/agents/build/text/), and [virtual avatars](https://docs.livekit.io/agents/integrations/avatar).
+This project is a Next.js-based starter for building real-time voice, video, and AI-powered applications using LiveKit, Google Cloud Vision OCR, Google TTS, and on-device ML models (TFLite/ONNX). It is designed for rapid prototyping of agent and computer vision features.
 
-Also available for:
-[Android](https://github.com/livekit-examples/agent-starter-android) • [Flutter](https://github.com/livekit-examples/agent-starter-flutter) • [Swift](https://github.com/livekit-examples/agent-starter-swift) • [React Native](https://github.com/livekit-examples/agent-starter-react-native)
+## Features
 
-<picture>
-  <source srcset="./.github/assets/readme-hero-dark.webp" media="(prefers-color-scheme: dark)">
-  <source srcset="./.github/assets/readme-hero-light.webp" media="(prefers-color-scheme: light)">
-  <img src="./.github/assets/readme-hero-light.webp" alt="App screenshot">
-</picture>
+- Real-time voice
+- Google Cloud Vision OCR API integration (via environment variables)
+- Google Cloud Text-to-Speech (TTS) API integration
+- Camera capture and image upload
+- On-device model inference (TFLite/ONNX) for object detection/recognition
+- Model files included in `public/models`
+- Modern UI with theme switching and customizable branding
+- Modular React components and hooks
 
-### Features:
-
-- Real-time voice interaction with LiveKit Agents
-- Camera video streaming support
-- Screen sharing capabilities
-- Audio visualization and level monitoring
-- Virtual avatar integration
-- Light/dark theme switching with system preference detection
-- Customizable branding, colors, and UI text via configuration
-
-This template is built with Next.js and is free for you to use or modify as you see fit.
-
-### Project structure
+## Project Structure
 
 ```
 agent-starter-react/
 ├── app/
-│   ├── (app)/
 │   ├── api/
-│   ├── components/
-│   ├── fonts/
-│   ├── globals.css
-│   └── layout.tsx
+│   │   ├── ocr/           # OCR API route (Google Vision)
+│   │   ├── tts/           # TTS API route (Google TTS)
+│   │   └── ...
+│   ├── detections/        # Detection UI
+│   ├── ui/                # Main UI pages
+│   └── ...
 ├── components/
-│   ├── livekit/
-│   ├── ui/
-│   ├── app.tsx
-│   ├── session-view.tsx
-│   └── welcome.tsx
-├── hooks/
-├── lib/
+│   ├── app/               # App-specific components
+│   └── livekit/           # LiveKit UI components
+├── hooks/                 # Custom React hooks
+├── lib/                   # Utility and ML loader code
 ├── public/
+│   ├── models/            # TFLite/ONNX model files
+│   ├── onnx-wasm/         # ONNX WASM runtime files
+│   └── ...
+├── styles/                # Global styles
+├── .env.example           # Example environment variables
+├── app-config.ts          # App branding/config
 └── package.json
 ```
 
-## Getting started
+## Getting Started
 
-> [!TIP]
-> If you'd like to try this application without modification, you can deploy an instance in just a few clicks with [LiveKit Cloud Sandbox](https://cloud.livekit.io/projects/p_/sandbox/templates/agent-starter-react).
-
-[![Open on LiveKit](https://img.shields.io/badge/Open%20on%20LiveKit%20Cloud-002CF2?style=for-the-badge&logo=external-link)](https://cloud.livekit.io/projects/p_/sandbox/templates/agent-starter-react)
-
-Run the following command to automatically clone this template.
-
-```bash
-lk app create --template agent-starter-react
-```
-
-Then run the app with:
+1. **Install dependencies:**
 
 ```bash
 pnpm install
+```
+
+2. **Copy and configure environment variables:**
+
+```bash
+cp .env.example .env.local
+# Edit .env.local with your Google Cloud and LiveKit credentials
+```
+
+- For Google Vision/TTS, fill in the values from your Google Cloud service account JSON.
+- For LiveKit, set your API key, secret, and server URL.
+
+3. **Run the development server:**
+
+```bash
 pnpm dev
 ```
 
-And open http://localhost:3000 in your browser.
+4. Open [http://localhost:3000](http://localhost:3000) in your browser.
 
-You'll also need an agent to speak with. Try our starter agent for [Python](https://github.com/livekit-examples/agent-starter-python), [Node.js](https://github.com/livekit-examples/agent-starter-node), or [create your own from scratch](https://docs.livekit.io/agents/start/voice-ai/).
+## Environment Variables
+
+See `.env.example` for all required variables. Example:
+
+```env
+LIVEKIT_API_KEY=your_livekit_api_key
+LIVEKIT_API_SECRET=your_livekit_api_secret
+LIVEKIT_URL=wss://your-livekit-server
+
+# Google Vision/TTS
+VISION_OCR_TYPE=service_account
+VISION_OCR_PROJECT_ID=your_project_id
+VISION_OCR_PRIVATE_KEY_ID=your_private_key_id
+VISION_OCR_PRIVATE_KEY="-----BEGIN PRIVATE KEY-----\nYOUR_PRIVATE_KEY\n-----END PRIVATE KEY-----\n"
+VISION_OCR_CLIENT_EMAIL=your_service_account_email@your_project_id.iam.gserviceaccount.com
+VISION_OCR_CLIENT_ID=your_client_id
+VISION_OCR_AUTH_URI=https://accounts.google.com/o/oauth2/auth
+VISION_OCR_TOKEN_URI=https://oauth2.googleapis.com/token
+VISION_OCR_AUTH_PROVIDER_X509_CERT_URL=https://www.googleapis.com/oauth2/v1/certs
+VISION_OCR_CLIENT_X509_CERT_URL=https://www.googleapis.com/robot/v1/metadata/x509/your_service_account_email%40your_project_id.iam.gserviceaccount.com
+VISION_OCR_UNIVERSE_DOMAIN=googleapis.com
+```
+
+## Model Files
+
+TFLite and ONNX models are stored in `public/models/` and loaded dynamically for inference. ONNX WASM runtimes are in `public/onnx-wasm/`.
+
+## Customization
+
+- Update `app-config.ts` to change branding, UI text, and feature toggles.
+- Add or modify models in `public/models/` as needed.
+- Extend API routes in `app/api/` for new ML or agent features.
 
 ## Configuration
 
