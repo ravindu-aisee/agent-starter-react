@@ -15,16 +15,15 @@ export default async function Layout({ children }: LayoutProps) {
         <a
           target="_blank"
           rel="noopener noreferrer"
-          href="https://livekit.io"
           className="scale-100 transition-transform duration-300 hover:scale-110"
         >
           {/* eslint-disable-next-line @next/next/no-img-element */}
           <img src={logo} alt={`${companyName} Logo`} className="block size-6 dark:hidden" />
           {/* eslint-disable-next-line @next/next/no-img-element */}
           <img
-            src={logoDark ?? logo}
-            alt={`${companyName} Logo`}
-            className="hidden size-6 dark:block"
+          // src={logoDark ?? logo}
+          // alt={`${companyName} Logo`}
+          // className="hidden size-6 dark:block"
           />
         </a>
       </header>

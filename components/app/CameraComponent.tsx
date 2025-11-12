@@ -5,12 +5,15 @@ import Webcam from 'react-webcam';
 import { useDataChannel } from '@livekit/components-react';
 import { METRICS, performanceMonitor } from '@/lib/performance-monitor';
 import { Detection, literTModelManager } from '@/lib/tflite-loader';
+import { toastAlert } from '@/components/livekit/alert-toast';
 
 interface DataChannelMessage {
   type: 'query' | 'response';
   bus_number?: string;
+  request_id?: string;
   timestamp?: number;
   result?: string;
+  valid_bus_routes?: string[];
 }
 
 interface OCRResult {
@@ -25,6 +28,8 @@ export function CameraComponent() {
   // ---- UI / state ----
   const [showCamera, setShowCamera] = useState(false);
   const [lastQuery, setLastQuery] = useState<DataChannelMessage | null>(null);
+  const [currentRequestId, setCurrentRequestId] = useState<string>('');
+  const [validBusRoutes, setValidBusRoutes] = useState<string[] | null>(null);
   const [modelLoaded, setModelLoaded] = useState(false);
   const [modelStatus, setModelStatus] = useState('Not initialized');
   const [plateDetections, setPlateDetections] = useState<Detection[]>([]);
@@ -32,7 +37,13 @@ export function CameraComponent() {
   const [detectedBuses, setDetectedBuses] = useState<Map<number, string>>(new Map());
   const [debugInfo, setDebugInfo] = useState<string>('');
   const [frameRate, setFrameRate] = useState(0);
-  const [showDebug, setShowDebug] = useState(true); // Show debug by default
+  const [showDebug, setShowDebug] = useState(true);
+
+  // ---- Audio unlock state ----
+  const [audioReady, setAudioReady] = useState(false);
+  const [audioHint, setAudioHint] = useState<string>('');
+  const audioCtxRef = useRef<AudioContext | any | null>(null);
+  const primedAudioRef = useRef<HTMLAudioElement | null>(null);
 
   // ---- refs / infra ----
   const webcamRef = useRef<Webcam>(null);
@@ -47,6 +58,7 @@ export function CameraComponent() {
   const frameCountRef = useRef(0);
   const matchFoundRef = useRef(false);
   const targetBusNumberRef = useRef<string>('');
+  const validBusRoutesRef = useRef<string[]>([]);
 
   // Performance tracking
   const lastFrameTimeRef = useRef(0);
@@ -62,37 +74,6 @@ export function CameraComponent() {
   }>({ scale: 1, padX: 0, padY: 0 });
 
   // ---------------------------------- constants ----------------------------------------
-  const VALID_BUS_ROUTES = [
-    '382W',
-    '386',
-    '50',
-    '136',
-    '43M',
-    '34',
-    '110',
-    '84',
-    '117',
-    '36',
-    '190',
-    '83',
-    '502',
-    '972M',
-    '518',
-    '16',
-    '123',
-    '167',
-    '7',
-    '143',
-    '175',
-    '27',
-    '506',
-    '858',
-    '48',
-    '272',
-    '27A',
-    '34A',
-    '14',
-  ];
   const OBJECT_COOLDOWN_MS = 5000;
   const isMobile = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(
     navigator.userAgent
@@ -101,7 +82,7 @@ export function CameraComponent() {
   const CLASS_NAMES = ['busnumber'];
   const ALLOWED = ['busnumber'];
   const INPUT_SIZE = 640;
-  const YOLO_CONF = isMobile ? 0.15 : 0.2; // Lower threshold for mobile
+  const YOLO_CONF = isMobile ? 0.15 : 0.2;
   const YOLO_IOU = 0.5;
 
   // --------------------------- LiveKit datachannel handler ---------------------------
@@ -110,8 +91,22 @@ export function CameraComponent() {
       const data: DataChannelMessage = JSON.parse(new TextDecoder().decode(message.payload));
       console.log('Received data from backend:', data);
 
-      if (data.type === 'query') {
-        console.log('Opening camera for query:', data.bus_number);
+      if (data.type === 'query' && data.request_id) {
+        if (Array.isArray(data.valid_bus_routes) && data.valid_bus_routes.length > 0) {
+          setValidBusRoutes(data.valid_bus_routes);
+          validBusRoutesRef.current = data.valid_bus_routes;
+          console.log(
+            `Received ${data.valid_bus_routes.length} valid bus routes from backend:`,
+            data.valid_bus_routes
+          );
+        } else {
+          console.error('No valid bus routes received from backend!');
+          setValidBusRoutes([]);
+          validBusRoutesRef.current = [];
+        }
+        console.log(`Opening camera for query: ${data.bus_number} (request_id: ${data.request_id})`);
+
+        setCurrentRequestId(data.request_id);
 
         // Reset all state for new query
         setShowCamera(true);
@@ -133,9 +128,9 @@ export function CameraComponent() {
         console.log(`Target bus number: ${data.bus_number} → Normalized: ${normalizedTarget}`);
 
         if (data.bus_number) {
-          sendResponse(`Camera started - scanning for bus number ${data.bus_number}...`);
+          sendResponse(`Camera started for bus number ${data.bus_number}...`, data.request_id);
         } else {
-          sendResponse('Camera started successfully');
+          sendResponse('Camera started successfully', data.request_id);
         }
       }
     } catch (error) {
@@ -168,27 +163,27 @@ export function CameraComponent() {
 
   const findClosestValidRoute = useCallback(
     (ocrTextRaw: string): string => {
+      const busRoutes = validBusRoutesRef.current;
+      if (!busRoutes || busRoutes.length === 0) {
+        console.warn('No valid bus routes available for validation');
+        return 'None';
+      }
+
       const ocrText = normalizeBusNumber(ocrTextRaw);
       if (!ocrText || ocrText === 'NONE') return 'None';
 
-      console.log(`Validating OCR result: "${ocrText}"`);
+      console.log(`Validating OCR result: "${ocrText}" against ${busRoutes.length} routes`);
       if (ocrText.length < 2) return 'None';
 
-      // exact match
-      if (VALID_BUS_ROUTES.includes(ocrText)) return ocrText;
+      if (busRoutes.includes(ocrText)) return ocrText;
 
-      // route contained in OCR
-      for (const r of VALID_BUS_ROUTES)
-        if (ocrText.includes(r) && r.length >= ocrText.length * 0.5) return r;
+      for (const r of busRoutes) if (ocrText.includes(r) && r.length >= ocrText.length * 0.5) return r;
 
-      // OCR contained in route
-      for (const r of VALID_BUS_ROUTES)
-        if (r.includes(ocrText) && ocrText.length >= r.length * 0.6) return r;
+      for (const r of busRoutes) if (r.includes(ocrText) && ocrText.length >= r.length * 0.6) return r;
 
-      // close edit distance
       let best = 'None',
         bestD = Infinity;
-      for (const r of VALID_BUS_ROUTES) {
+      for (const r of busRoutes) {
         const d = levenshteinDistance(ocrText, r);
         if (d <= 1 && Math.abs(ocrText.length - r.length) <= 1 && d < bestD) {
           best = r;
@@ -255,19 +250,24 @@ export function CameraComponent() {
 
   // ---------------------------------- responses / TTS ----------------------------------
   const sendResponse = useCallback(
-    (result: string) => {
+    (result: string, requestId?: string) => {
       if (!send) {
         console.error('Data channel send function not available');
         return;
       }
-      const response: DataChannelMessage = { type: 'response', result };
+      const response: DataChannelMessage = {
+        type: 'response',
+        result,
+        request_id: requestId || currentRequestId,
+      };
       try {
         send(new TextEncoder().encode(JSON.stringify(response)), { reliable: true });
+        console.log(`Sent response with request_id: ${requestId || currentRequestId}`);
       } catch (e) {
         console.error('Failed to send response:', e);
       }
     },
-    [send]
+    [send, currentRequestId]
   );
 
   const clearAllStates = () => {
@@ -276,6 +276,7 @@ export function CameraComponent() {
     setOcrResults([]);
     setDetectedBuses(new Map());
     setLastQuery(null);
+    setCurrentRequestId('');
     setDebugInfo('');
     frameCountRef.current = 0;
     processingIdsRef.current.clear();
@@ -283,12 +284,69 @@ export function CameraComponent() {
     announcedBusesRef.current.clear();
     matchFoundRef.current = false;
     targetBusNumberRef.current = '';
+    validBusRoutesRef.current = [];
     frameTimesRef.current = [];
     performanceScores.current = [];
     adaptiveFrameSkip.current = isMobile ? 3 : 2;
+    setValidBusRoutes(null);
     const c = canvasRef.current;
     if (c) c.getContext('2d')?.clearRect(0, 0, c.width, c.height);
   };
+
+  const unlockAudio = useCallback(async () => {
+    try {
+      // Prime an Audio element for iOS - CRITICAL for iOS Safari
+      if (!primedAudioRef.current) {
+        const audio = new Audio();
+        audio.preload = 'none';
+        (audio as any).playsInline = true;
+        audio.muted = false;
+        
+        // Load a silent data URL to "prime" the audio element
+        audio.src = 'data:audio/mp3;base64,SUQzBAAAAAAAI1RTU0UAAAAPAAADTGF2ZjU4Ljc2LjEwMAAAAAAAAAAAAAAA//tQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWGluZwAAAA8AAAACAAADhAC7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7//////////////////////////////////////////////////////////////////8AAAAATGF2YzU4LjEzAAAAAAAAAAAAAAAAJAAAAAAAAAAAA4T0LnrfAAAAAAAAAAAAAAAAAAAAAP/7UGQAD/AAAGkAAAAIAAANIAAAAQAAAaQAAAAgAAA0gAAABExBTUUzLjEwMFVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVQ==';
+        
+        // Play silence to unlock - this MUST happen during user gesture
+        try {
+          await audio.play();
+          audio.pause();
+          audio.currentTime = 0;
+        } catch (e) {
+          console.warn('[Audio] Play/pause during unlock failed:', e);
+        }
+        
+        primedAudioRef.current = audio;
+        console.log('[Audio] Primed audio element for iOS');
+      }
+
+      const Ctx =
+        (window as any).AudioContext ||
+        (window as any).webkitAudioContext ||
+        (window as any).webkitaudioContext;
+      
+      if (Ctx) {
+        if (!audioCtxRef.current) {
+          audioCtxRef.current = new Ctx();
+        }
+        const ctx = audioCtxRef.current as AudioContext;
+
+        await ctx.resume();
+        const buf = ctx.createBuffer(1, 1, ctx.sampleRate);
+        const src = ctx.createBufferSource();
+        src.buffer = buf;
+        src.connect(ctx.destination);
+        src.start(0);
+        console.log('[Audio] WebAudio context unlocked');
+      }
+
+      setAudioReady(true);
+      setAudioHint('');
+      console.log('[Audio] Unlocked successfully');
+    } catch (e) {
+      console.warn('[Audio] Unlock failed:', e);
+      setAudioReady(true);
+      setAudioHint('Tap again if you still can\'t hear audio.');
+    }
+  }, []);
 
   const playTTSAnnouncement = async (busNumber: string): Promise<void> => {
     if (announcedBusesRef.current.has(busNumber)) {
@@ -298,6 +356,12 @@ export function CameraComponent() {
     try {
       const text = `Bus ${busNumber} has arrived.`;
       announcedBusesRef.current.add(busNumber);
+
+      // Show popup notification
+      toastAlert({
+        title: 'Bus Arrived!',
+        description: `Bus ${busNumber} has arrived.`
+      });
 
       const response = await fetch('/api/tts', {
         method: 'POST',
@@ -312,20 +376,75 @@ export function CameraComponent() {
       }
 
       const audioBlob = await response.blob();
-      const audioUrl = URL.createObjectURL(audioBlob);
-      const audio = new Audio(audioUrl);
 
-      audio.play().catch((err) => {
+      try {
+        const hasWebAudio =
+          typeof window !== 'undefined' &&
+          !!(
+            (window as any).AudioContext ||
+            (window as any).webkitAudioContext ||
+            (window as any).webkitaudioContext
+          );
+
+        // Prefer WebAudio when unlocked (best on iOS)
+        if (audioReady && hasWebAudio && audioCtxRef.current) {
+          const ctx = audioCtxRef.current as AudioContext;
+
+          await ctx.resume();
+          const arrayBuf = await audioBlob.arrayBuffer();
+          const audioBuf = await new Promise<AudioBuffer>((resolve, reject) => {
+            ctx.decodeAudioData(arrayBuf, resolve, reject);
+          });
+
+          const src = ctx.createBufferSource();
+          src.buffer = audioBuf;
+          src.connect(ctx.destination);
+          src.start(0);
+
+          src.onended = () => {
+            console.log('TTS playback finished (WebAudio)');
+            setShowCamera(false);
+            setTimeout(() => clearAllStates(), 300);
+          };
+        } else {
+          // Use primed audio element for iOS - CRITICAL for iOS Safari
+          const audio = primedAudioRef.current || new Audio();
+          
+          // Configure for iOS
+          (audio as any).playsInline = true;
+          audio.muted = false;
+          audio.preload = 'auto';
+
+          // Create object URL and set as source
+          const audioUrl = URL.createObjectURL(audioBlob);
+          audio.src = audioUrl;
+
+          // Load the audio
+          await audio.load();
+
+          // Play - this should work because the audio element was primed during user gesture
+          await audio.play();
+
+          audio.onended = () => {
+            URL.revokeObjectURL(audioUrl);
+            console.log('TTS playback finished (HTMLAudio)');
+            setShowCamera(false);
+            setTimeout(() => clearAllStates(), 300);
+          };
+
+          audio.onerror = (e) => {
+            console.error('Audio playback error:', e);
+            URL.revokeObjectURL(audioUrl);
+            announcedBusesRef.current.delete(busNumber);
+          };
+        }
+      } catch (err: any) {
         console.error('Error playing TTS:', err);
+        if (String(err?.name || err).includes('NotAllowedError')) {
+          setAudioHint('Tap "Enable sound" to allow audio, then I\'ll speak automatically next time.');
+        }
         announcedBusesRef.current.delete(busNumber);
-      });
-
-      audio.onended = () => {
-        URL.revokeObjectURL(audioUrl);
-        console.log(' TTS playback finished');
-        setShowCamera(false);
-        setTimeout(() => clearAllStates(), 300);
-      };
+      }
     } catch (error) {
       console.error('TTS error:', error);
       announcedBusesRef.current.delete(busNumber);
@@ -347,7 +466,7 @@ export function CameraComponent() {
   const cropWithPadding = (
     video: HTMLVideoElement,
     bbox: [number, number, number, number],
-    pad = 0.2
+    pad = 0.3
   ): string => {
     const [x, y, w, h] = bbox;
     const vx = Math.max(0, x - w * pad);
@@ -437,8 +556,7 @@ export function CameraComponent() {
 
       const corner = Math.min(bw, bh) * 0.15;
       ctx.lineWidth = 4;
-
-      // corners
+      
       ctx.beginPath();
       ctx.moveTo(x, y + corner);
       ctx.lineTo(x, y);
@@ -463,7 +581,6 @@ export function CameraComponent() {
       ctx.lineTo(x + bw, y + bh - corner);
       ctx.stroke();
 
-      // Label with coordinates
       const label = `${d.class_name ?? 'busnumber'} ${(d.confidence * 100).toFixed(1)}%`;
       const coordLabel = `[${x.toFixed(0)},${y.toFixed(0)} ${bw.toFixed(0)}x${bh.toFixed(0)}]`;
 
@@ -522,10 +639,8 @@ export function CameraComponent() {
 
     frameCountRef.current++;
 
-    // Adaptive frame skipping
     if (frameCountRef.current % adaptiveFrameSkip.current !== 0) return;
 
-    // Calculate FPS
     const now = performance.now();
     if (lastFrameTimeRef.current) {
       const delta = now - lastFrameTimeRef.current;
@@ -541,7 +656,6 @@ export function CameraComponent() {
     const pipelineTimer = performanceMonitor.start(METRICS.DETECTION_PIPELINE);
 
     try {
-      // Enhanced preprocessing with letterboxing
       const preId = performanceMonitor.start(METRICS.PREPROCESSING);
       const {
         tensor: inputTensor,
@@ -550,55 +664,42 @@ export function CameraComponent() {
         padY,
       } = await literTModelManager.preprocessImage(video, INPUT_SIZE);
 
-      // Store preprocessing state for coordinate transformation
       preprocessStateRef.current = { scale, padX, padY };
 
       performanceMonitor.end(preId);
 
       console.log(
-        `[Preprocess] Video: ${video.videoWidth}x${video.videoHeight}, Scale: ${scale.toFixed(3)}, Pad: ${padX},${padY}`
+        `[Preprocess] Video: ${video.videoWidth}x${video.videoHeight}, Scale: ${scale.toFixed(
+          3
+        )}, Pad: ${padX},${padY}`
       );
 
-      // Run inference
       const infId = performanceMonitor.start(METRICS.INFERENCE);
       const raw = await literTModelManager.runInference(model, inputTensor);
       const inferenceTime = performanceMonitor.end(infId);
 
-      // Postprocess with proper coordinate transformation
       const postId = performanceMonitor.start(METRICS.POSTPROCESSING);
       const boxes = literTModelManager.processDetections(
         raw,
         video.videoWidth,
         video.videoHeight,
-        scale, // Scale for coordinate transformation
-        padX, // Padding X
-        padY, // Padding Y
+        scale,
+        padX,
+        padY,
         YOLO_CONF,
         YOLO_IOU,
         INPUT_SIZE,
         {
           classNames: CLASS_NAMES,
           allowedClassNames: ALLOWED,
-          minBoxArea: isMobile ? 10 * 10 : 12 * 12, // Smaller minimum for mobile
-          aspectRatioRange: [0.15, 6], // More flexible aspect ratio
+          minBoxArea: isMobile ? 10 * 10 : 12 * 12,
+          aspectRatioRange: [0.15, 6],
         }
       );
       performanceMonitor.end(postId);
 
       const pipelineTime = performanceMonitor.end(pipelineTimer);
 
-      // // Update debug info
-      // setDebugInfo(`Device: ${isMobile ? 'Mobile' : 'Desktop'}
-      // Resolution: ${video.videoWidth}x${video.videoHeight}
-      // Scale: ${scale.toFixed(3)} | Pad: ${padX},${padY}
-      // Detections: ${boxes.length}
-      // Confidence: ${YOLO_CONF} | IOU: ${YOLO_IOU}
-      // Inference: ${inferenceTime.toFixed(1)}ms
-      // Pipeline: ${pipelineTime.toFixed(1)}ms
-      // FPS: ${frameRate} | Skip: ${adaptiveFrameSkip.current}
-      // Target: ${targetBusNumberRef.current || 'None'}`);
-
-      // Adaptive performance management
       performanceScores.current.push(pipelineTime);
       if (performanceScores.current.length > 10) {
         performanceScores.current.shift();
@@ -606,16 +707,19 @@ export function CameraComponent() {
         const avgTime =
           performanceScores.current.reduce((a, b) => a + b, 0) / performanceScores.current.length;
 
-        // Adjust frame skip for mobile performance
         if (avgTime > 250 && adaptiveFrameSkip.current < 5) {
           adaptiveFrameSkip.current++;
           console.log(
-            `[Perf] Increasing frame skip to ${adaptiveFrameSkip.current} (avg: ${avgTime.toFixed(0)}ms)`
+            `[Perf] Increasing frame skip to ${adaptiveFrameSkip.current} (avg: ${avgTime.toFixed(
+              0
+            )}ms)`
           );
         } else if (avgTime < 150 && adaptiveFrameSkip.current > 1) {
           adaptiveFrameSkip.current--;
           console.log(
-            `[Perf] Decreasing frame skip to ${adaptiveFrameSkip.current} (avg: ${avgTime.toFixed(0)}ms)`
+            `[Perf] Decreasing frame skip to ${adaptiveFrameSkip.current} (avg: ${avgTime.toFixed(
+              0
+            )}ms)`
           );
         }
       }
@@ -628,18 +732,25 @@ export function CameraComponent() {
       const targetBusRaw = targetBusNumberRef.current;
       const targetBus = normalizeBusNumber(targetBusRaw);
 
-      // Log all detections with coordinates
       boxes.forEach((det, idx) => {
         const [x, y, w, h] = det.bbox;
         console.log(
-          `[Det ${idx}] bbox=[${x.toFixed(0)}, ${y.toFixed(0)}, ${w.toFixed(0)}, ${h.toFixed(0)}] conf=${(det.confidence * 100).toFixed(1)}%`
+          `[Det ${idx}] bbox=[${x.toFixed(0)}, ${y.toFixed(0)}, ${w.toFixed(
+            0
+          )}, ${h.toFixed(0)}] conf=${(det.confidence * 100).toFixed(1)}%`
         );
       });
 
-      // Process detections
       await Promise.all(
         boxes.map(async (det) => {
           if (matchFoundRef.current) return;
+
+          if (det.confidence < 0.5) {
+            console.log(
+              `[Detection] Skipping low confidence detection: ${(det.confidence * 100).toFixed(1)}%`
+            );
+            return;
+          }
 
           const objectId = generateObjectId(det.bbox);
           const now = Date.now();
@@ -651,8 +762,7 @@ export function CameraComponent() {
           processingIdsRef.current.add(objectId);
 
           try {
-            // Crop uses already-transformed coordinates
-            const crop = cropWithPadding(video, det.bbox, 0.2);
+            const crop = cropWithPadding(video, det.bbox, 0.4);
             const ts = Date.now();
             const label = det.class_name ?? `cls${det.class_id}`;
 
@@ -661,18 +771,24 @@ export function CameraComponent() {
             const validated = findClosestValidRoute(ocrNorm);
             const ocrMs = performance.now() - ocrStart;
 
-            console.log(`OCR ${ocrMs.toFixed(1)}ms | raw="${ocrNorm}" | validated="${validated}"`);
-
             processedObjectsRef.current.set(objectId, Date.now());
             processingIdsRef.current.delete(objectId);
 
             if (!validated || validated === 'None') return;
 
+            const currentValidRoutes = validBusRoutesRef.current;
+            if (!currentValidRoutes || currentValidRoutes.length === 0) {
+              console.warn('No valid bus routes available, skipping validation');
+              return;
+            }
+
             const isMatch = !!targetBus && validated === targetBus;
 
             console.log('='.repeat(60));
             console.log(
-              `COMPARISON: OCR="${validated}" vs TARGET="${targetBus}" → ${isMatch ? '✅ MATCH' : '❌ NO MATCH'}`
+              `COMPARISON: OCR="${validated}" vs TARGET="${targetBus}" → ${
+                isMatch ? '✅ MATCH' : '❌ NO MATCH'
+              }`
             );
             console.log('='.repeat(60));
 
@@ -680,24 +796,12 @@ export function CameraComponent() {
               matchFoundRef.current = true;
               console.log('MATCH FOUND! Stopping all processing...');
               stopLoop();
-              //sendResponse(`Bus number ${validated} detected successfully!`);
               await playTTSAnnouncement(validated);
-
-              const filename = `captured_images/${label}_${objectId}_${ts}.jpg`;
-              const annotated = `bus_${validated}_${objectId}_${ts}.jpg`;
-              saveImageAsync(crop, filename).catch(() => {});
-              annotateAndSaveImage(crop, validated, det.confidence, annotated);
               return;
             }
 
             setDetectedBuses((prev) => new Map(prev).set(objectId, validated));
             setOcrResults((prev) => [validated, ...prev].slice(0, 5));
-            //sendResponse(`Detected bus: ${validated}`);
-
-            const filename = `captured_images/${label}_${objectId}_${ts}.jpg`;
-            const annotated = `bus_${validated}_${objectId}_${ts}.jpg`;
-            saveImageAsync(crop, filename).catch(() => {});
-            annotateAndSaveImage(crop, validated, det.confidence, annotated);
           } catch (err) {
             console.error('❌ Detection item error:', err);
             processingIdsRef.current.delete(objectId);
@@ -720,28 +824,7 @@ export function CameraComponent() {
 
   // ---------------------------------------- UI ----------------------------------------
   if (!showCamera) {
-    return (
-      <div
-      // style={{
-      //   position: 'fixed',
-      //   bottom: 20,
-      //   right: 20,
-      //   padding: '12px 20px',
-      //   backgroundColor: modelLoaded ? 'rgba(0, 255, 0, 0.2)' : 'rgba(255, 165, 0, 0.2)',
-      //   border: modelLoaded ? '2px solid #00ff00' : '2px solid #ffa500',
-      //   borderRadius: 8,
-      //   color: 'white',
-      //   fontSize: '.85rem',
-      //   zIndex: 999,
-      //   boxShadow: '0 2px 10px rgba(0,0,0,0.3)',
-      // }}
-      >
-        {/* <strong>YOLO Model:</strong> {modelLoaded ? 'Ready' : 'Loading...'}
-        {!modelLoaded && (
-          <div style={{ fontSize: '.75rem', marginTop: 4, opacity: 0.8 }}>{modelStatus}</div>
-        )} */}
-      </div>
-    );
+    return <div />;
   }
 
   return (
@@ -777,6 +860,40 @@ export function CameraComponent() {
         </div>
       )}
 
+      {!audioReady && (
+        <button
+          onClick={unlockAudio}
+          style={{
+            marginBottom: 12,
+            padding: '10px 16px',
+            fontSize: '0.95rem',
+            background: '#28a745',
+            color: 'white',
+            border: 'none',
+            borderRadius: 8,
+            cursor: 'pointer',
+          }}
+        >
+          🔊 Enable sound
+        </button>
+      )}
+      {audioHint && (
+        <div
+          style={{
+            marginBottom: 12,
+            padding: '8px 12px',
+            background: 'rgba(255,255,255,0.1)',
+            border: '1px solid rgba(255,255,255,0.2)',
+            borderRadius: 8,
+            fontSize: '.85rem',
+            maxWidth: 600,
+            textAlign: 'center',
+          }}
+        >
+          {audioHint}
+        </div>
+      )}
+
       <div
         style={{
           position: 'relative',
@@ -796,7 +913,7 @@ export function CameraComponent() {
           style={{ width: '100%', height: 'auto', display: 'block' }}
           videoConstraints={{
             facingMode: 'environment',
-            width: { ideal: isMobile ? 1920 : 1920, max: 3840 }, // Higher resolution for mobile
+            width: { ideal: isMobile ? 1920 : 1920, max: 3840 },
             height: { ideal: isMobile ? 1080 : 1080, max: 2160 },
             frameRate: { ideal: 30, max: 30 },
             aspectRatio: 16 / 9,
