@@ -111,32 +111,34 @@ class LiteRTModelManager {
    * Uses letterboxing to preserve aspect ratio
    */
   async preprocessImage(
-    videoElement: HTMLVideoElement, 
+    videoElement: HTMLVideoElement,
     targetSize = 640
   ): Promise<{ tensor: Tensor; scale: number; padX: number; padY: number }> {
     const srcW = videoElement.videoWidth;
     const srcH = videoElement.videoHeight;
-    
+
     // Calculate scale to fit image in targetSize square while preserving aspect ratio
     const scale = Math.min(targetSize / srcW, targetSize / srcH);
     const scaledW = Math.round(srcW * scale);
     const scaledH = Math.round(srcH * scale);
-    
+
     // Calculate padding to center the image
     const padX = Math.floor((targetSize - scaledW) / 2);
     const padY = Math.floor((targetSize - scaledH) / 2);
 
-    console.log(`[LiteRT] Preprocessing: ${srcW}x${srcH} -> ${scaledW}x${scaledH} (scale: ${scale.toFixed(3)}, pad: ${padX},${padY})`);
+    console.log(
+      `[LiteRT] Preprocessing: ${srcW}x${srcH} -> ${scaledW}x${scaledH} (scale: ${scale.toFixed(3)}, pad: ${padX},${padY})`
+    );
 
     // Create canvas with letterboxing
     const canvas = document.createElement('canvas');
     canvas.width = targetSize;
     canvas.height = targetSize;
-    const ctx = canvas.getContext('2d', { 
+    const ctx = canvas.getContext('2d', {
       willReadFrequently: true,
-      alpha: false 
+      alpha: false,
     });
-    
+
     if (!ctx) throw new Error('Canvas 2D context not available');
 
     // Fill with gray background (114/255 = 0.447 - standard YOLO padding)
@@ -174,12 +176,12 @@ class LiteRTModelManager {
     sizes: number[] = [640, 800, 960]
   ): Promise<Array<{ tensor: Tensor; scale: number; padX: number; padY: number; size: number }>> {
     const results = [];
-    
+
     for (const size of sizes) {
       const result = await this.preprocessImage(videoElement, size);
       results.push({ ...result, size });
     }
-    
+
     return results;
   }
 
@@ -232,7 +234,7 @@ class LiteRTModelManager {
    */
   private inferOutputShape(data: Float32Array): string {
     const len = data.length;
-    
+
     // Common YOLO11 output shapes
     const possibleShapes = [
       { anchors: 8400, attrs: 6, desc: '[1, 6, 8400] - YOLO11 standard' },
@@ -290,7 +292,9 @@ class LiteRTModelManager {
       transposed = true; // [1, 8400, 6]
     }
 
-    console.log(`[LiteRT] Processing ${numBoxes} boxes with ${numAttr} attributes (transposed: ${transposed})`);
+    console.log(
+      `[LiteRT] Processing ${numBoxes} boxes with ${numAttr} attributes (transposed: ${transposed})`
+    );
 
     // Determine if we have objectness
     const hasObj = numAttr > 5;
@@ -334,10 +338,10 @@ class LiteRTModelManager {
       // 1. Remove padding
       const x_model = cx - w / 2;
       const y_model = cy - h / 2;
-      
+
       const x_unpadded = x_model - padX;
       const y_unpadded = y_model - padY;
-      
+
       // 2. Scale back to original size
       const x_orig = x_unpadded / scale;
       const y_orig = y_unpadded / scale;
@@ -355,7 +359,7 @@ class LiteRTModelManager {
       // Quality filters
       const area = bw * bh;
       const ar = bw / Math.max(1, bh);
-      
+
       if (area < minBoxArea) continue;
       if (ar < aspectRatioRange[0] || ar > aspectRatioRange[1]) continue;
 
@@ -392,8 +396,10 @@ class LiteRTModelManager {
     const [ax, ay, aw, ah] = a;
     const [bx, by, bw, bh] = b;
 
-    const ax2 = ax + aw, ay2 = ay + ah;
-    const bx2 = bx + bw, by2 = by + bh;
+    const ax2 = ax + aw,
+      ay2 = ay + ah;
+    const bx2 = bx + bw,
+      by2 = by + bh;
 
     const iw = Math.max(0, Math.min(ax2, bx2) - Math.max(ax, bx));
     const ih = Math.max(0, Math.min(ay2, by2) - Math.max(ay, by));

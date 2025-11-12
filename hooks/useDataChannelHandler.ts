@@ -27,7 +27,7 @@ export function useDataChannelHandler(options: DataChannelHandlerOptions = {}) {
     try {
       const decoder = new TextDecoder();
       const data: DataChannelMessage = JSON.parse(decoder.decode(message.payload));
-      
+
       console.log('📨 [DataChannel] Received message:', data);
 
       // Route message based on type

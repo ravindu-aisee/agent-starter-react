@@ -3,9 +3,9 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import Webcam from 'react-webcam';
 import { useDataChannel } from '@livekit/components-react';
+import { toastAlert } from '@/components/livekit/alert-toast';
 import { METRICS, performanceMonitor } from '@/lib/performance-monitor';
 import { Detection, literTModelManager } from '@/lib/tflite-loader';
-import { toastAlert } from '@/components/livekit/alert-toast';
 
 interface DataChannelMessage {
   type: 'query' | 'response';
@@ -104,7 +104,9 @@ export function CameraComponent() {
           setValidBusRoutes([]);
           validBusRoutesRef.current = [];
         }
-        console.log(`Opening camera for query: ${data.bus_number} (request_id: ${data.request_id})`);
+        console.log(
+          `Opening camera for query: ${data.bus_number} (request_id: ${data.request_id})`
+        );
 
         setCurrentRequestId(data.request_id);
 
@@ -177,9 +179,11 @@ export function CameraComponent() {
 
       if (busRoutes.includes(ocrText)) return ocrText;
 
-      for (const r of busRoutes) if (ocrText.includes(r) && r.length >= ocrText.length * 0.5) return r;
+      for (const r of busRoutes)
+        if (ocrText.includes(r) && r.length >= ocrText.length * 0.5) return r;
 
-      for (const r of busRoutes) if (r.includes(ocrText) && ocrText.length >= r.length * 0.6) return r;
+      for (const r of busRoutes)
+        if (r.includes(ocrText) && ocrText.length >= r.length * 0.6) return r;
 
       let best = 'None',
         bestD = Infinity;
@@ -301,10 +305,11 @@ export function CameraComponent() {
         audio.preload = 'none';
         (audio as any).playsInline = true;
         audio.muted = false;
-        
+
         // Load a silent data URL to "prime" the audio element
-        audio.src = 'data:audio/mp3;base64,SUQzBAAAAAAAI1RTU0UAAAAPAAADTGF2ZjU4Ljc2LjEwMAAAAAAAAAAAAAAA//tQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWGluZwAAAA8AAAACAAADhAC7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7//////////////////////////////////////////////////////////////////8AAAAATGF2YzU4LjEzAAAAAAAAAAAAAAAAJAAAAAAAAAAAA4T0LnrfAAAAAAAAAAAAAAAAAAAAAP/7UGQAD/AAAGkAAAAIAAANIAAAAQAAAaQAAAAgAAA0gAAABExBTUUzLjEwMFVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVQ==';
-        
+        audio.src =
+          'data:audio/mp3;base64,SUQzBAAAAAAAI1RTU0UAAAAPAAADTGF2ZjU4Ljc2LjEwMAAAAAAAAAAAAAAA//tQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWGluZwAAAA8AAAACAAADhAC7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7//////////////////////////////////////////////////////////////////8AAAAATGF2YzU4LjEzAAAAAAAAAAAAAAAAJAAAAAAAAAAAA4T0LnrfAAAAAAAAAAAAAAAAAAAAAP/7UGQAD/AAAGkAAAAIAAANIAAAAQAAAaQAAAAgAAA0gAAABExBTUUzLjEwMFVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVQ==';
+
         // Play silence to unlock - this MUST happen during user gesture
         try {
           await audio.play();
@@ -313,7 +318,7 @@ export function CameraComponent() {
         } catch (e) {
           console.warn('[Audio] Play/pause during unlock failed:', e);
         }
-        
+
         primedAudioRef.current = audio;
         console.log('[Audio] Primed audio element for iOS');
       }
@@ -322,7 +327,7 @@ export function CameraComponent() {
         (window as any).AudioContext ||
         (window as any).webkitAudioContext ||
         (window as any).webkitaudioContext;
-      
+
       if (Ctx) {
         if (!audioCtxRef.current) {
           audioCtxRef.current = new Ctx();
@@ -344,7 +349,7 @@ export function CameraComponent() {
     } catch (e) {
       console.warn('[Audio] Unlock failed:', e);
       setAudioReady(true);
-      setAudioHint('Tap again if you still can\'t hear audio.');
+      setAudioHint("Tap again if you still can't hear audio.");
     }
   }, []);
 
@@ -360,7 +365,7 @@ export function CameraComponent() {
       // Show popup notification
       toastAlert({
         title: 'Bus Arrived!',
-        description: `Bus ${busNumber} has arrived.`
+        description: `Bus ${busNumber} has arrived.`,
       });
 
       const response = await fetch('/api/tts', {
@@ -409,7 +414,7 @@ export function CameraComponent() {
         } else {
           // Use primed audio element for iOS - CRITICAL for iOS Safari
           const audio = primedAudioRef.current || new Audio();
-          
+
           // Configure for iOS
           (audio as any).playsInline = true;
           audio.muted = false;
@@ -441,7 +446,9 @@ export function CameraComponent() {
       } catch (err: any) {
         console.error('Error playing TTS:', err);
         if (String(err?.name || err).includes('NotAllowedError')) {
-          setAudioHint('Tap "Enable sound" to allow audio, then I\'ll speak automatically next time.');
+          setAudioHint(
+            'Tap "Enable sound" to allow audio, then I\'ll speak automatically next time.'
+          );
         }
         announcedBusesRef.current.delete(busNumber);
       }
@@ -556,7 +563,7 @@ export function CameraComponent() {
 
       const corner = Math.min(bw, bh) * 0.15;
       ctx.lineWidth = 4;
-      
+
       ctx.beginPath();
       ctx.moveTo(x, y + corner);
       ctx.lineTo(x, y);
