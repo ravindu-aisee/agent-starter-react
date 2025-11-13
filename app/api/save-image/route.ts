@@ -4,7 +4,7 @@ import path from 'node:path';
 
 export async function POST(req: NextRequest) {
   try {
-    const { image, filename } = await req.json() as { image: string; filename: string; };
+    const { image, filename } = (await req.json()) as { image: string; filename: string };
 
     if (!image || !filename) {
       return NextResponse.json({ error: 'Missing image or filename' }, { status: 400 });

@@ -777,7 +777,7 @@ export function CameraComponent() {
         boxes.map(async (det) => {
           // Early exit if match already found
           if (matchFoundRef.current) {
-            console.log('⏹️ Skipping detection - match already found');
+            console.log('Skipping detection - match already found');
             return;
           }
 
@@ -800,6 +800,10 @@ export function CameraComponent() {
           try {
             const crop = cropWithPadding(video, det.bbox, 0.4);
 
+            // // Save the cropped image before OCR
+            // const cropFilename = `crop_${objectId}_${Date.now()}.jpg`;
+            // saveImageAsync(crop, cropFilename);
+
             const ocrStart = performance.now();
             // OCR processing with automatic match detection via callback
             const ocrNorm = await runOCR(crop);
@@ -815,9 +819,15 @@ export function CameraComponent() {
 
             // Check if match was found during OCR (callback sets this)
             if (matchFoundRef.current) {
-              console.log('⏹️ Match found during OCR processing, stopping');
+              console.log('Match found during OCR processing, stopping');
               return;
             }
+
+            // // Save annotated image with detected text and confidence
+            // const annotatedFilename = `annotated_${objectId}_${validated}_${Math.round(
+            //   (det.confidence || 0) * 100
+            // )}_${Date.now()}.jpg`;
+            // annotateAndSaveImage(crop, validated, det.confidence || 0, annotatedFilename);
 
             // Update UI with detection
             setDetectedBuses((prev) => new Map(prev).set(objectId, validated));
