@@ -3,6 +3,7 @@ import path from 'path';
 import vision from '@google-cloud/vision';
 
 // Initialize the Vision API client with credentials from environment variables
+// Client is initialized once and reused across requests (singleton pattern)
 const client = new vision.ImageAnnotatorClient({
   credentials: {
     client_email: process.env.VISION_OCR_CLIENT_EMAIL,
@@ -11,7 +12,12 @@ const client = new vision.ImageAnnotatorClient({
   projectId: process.env.VISION_OCR_PROJECT_ID,
 });
 
+// Mark as dynamic to prevent static optimization (ensures client persists)
+export const dynamic = 'force-dynamic';
+export const runtime = 'nodejs'; // Use Node.js runtime for better performance with Google Vision
+
 export async function POST(request: NextRequest) {
+  const startTime = performance.now();
   try {
     const { image } = await request.json();
 
@@ -56,17 +62,29 @@ export async function POST(request: NextRequest) {
     });
     console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
 
+    // Extract individual words (excluding the first full-text detection)
+    const individualWords = detections
+      .slice(1)
+      .map((d) => d.description || '')
+      .filter((w) => w.trim());
+    console.log('Individual Words Array:', individualWords);
+
+    const totalTime = performance.now() - startTime;
+    console.log(`Total OCR processing time: ${totalTime.toFixed(2)}ms`);
+
     return NextResponse.json({
       success: true,
       text: fullText,
+      individualWords, // Array of individual words for better matching
       detections: detections.map((detection) => ({
         text: detection.description,
         bounds: detection.boundingPoly,
       })),
       wordCount: detections.length - 1,
+      processingTime: totalTime,
     });
   } catch (error) {
-    console.error('❌ OCR Error:', error);
+    console.error('OCR Error:', error);
     return NextResponse.json(
       {
         error: 'Failed to process image',

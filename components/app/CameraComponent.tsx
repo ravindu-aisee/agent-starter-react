@@ -4,6 +4,7 @@ import React, { useCallback, useEffect, useRef, useState } from 'react';
 import Webcam from 'react-webcam';
 import { useDataChannel } from '@livekit/components-react';
 import { toastAlert } from '@/components/livekit/alert-toast';
+import { warmupOCRAPI } from '@/lib/ocr-warmup';
 import { parallelOCRProcessor } from '@/lib/parallel-ocr';
 import { METRICS, performanceMonitor } from '@/lib/performance-monitor';
 import { Detection, literTModelManager } from '@/lib/tflite-loader';
@@ -134,8 +135,8 @@ export function CameraComponent() {
         console.log(`Target bus number: ${data.bus_number} → Normalized: ${normalizedTarget}`);
 
         // Set up match callback for immediate detection
-        parallelOCRProcessor.setMatchCallback((normalizedText, rawText) => {
-          const validated = findClosestValidRoute(normalizedText);
+        parallelOCRProcessor.setMatchCallback((normalizedText, rawText, individualWords) => {
+          const validated = findClosestValidRoute(normalizedText, individualWords);
           const isMatch = !!targetBusNumberRef.current && validated === targetBusNumberRef.current;
 
           if (isMatch) {
@@ -194,7 +195,7 @@ export function CameraComponent() {
   };
 
   const findClosestValidRoute = useCallback(
-    (ocrTextRaw: string): string => {
+    (ocrTextRaw: string, individualWords?: string[]): string => {
       const busRoutes = validBusRoutesRef.current;
       if (!busRoutes || busRoutes.length === 0) {
         console.warn('No valid bus routes available for validation');
@@ -205,16 +206,33 @@ export function CameraComponent() {
       if (!ocrText || ocrText === 'NONE') return 'None';
 
       console.log(`Validating OCR result: "${ocrText}" against ${busRoutes.length} routes`);
-      if (ocrText.length < 2) return 'None';
+      if (individualWords && individualWords.length > 0) {
+        console.log(`Individual words: [${individualWords.map((w) => `"${w}"`).join(', ')}]`);
+      }
 
+      // Level 1: Check full text exact match
       if (busRoutes.includes(ocrText)) return ocrText;
 
+      // Level 2: Check individual words for exact matches (most efficient for cases like "123" in mixed text)
+      if (individualWords && individualWords.length > 0) {
+        for (const word of individualWords) {
+          const normalizedWord = normalizeBusNumber(word);
+          if (normalizedWord && busRoutes.includes(normalizedWord)) {
+            console.log(`Found exact match in individual word: "${word}" → "${normalizedWord}"`);
+            return normalizedWord;
+          }
+        }
+      }
+
+      // Level 3: Check if full text contains a valid route
       for (const r of busRoutes)
         if (ocrText.includes(r) && r.length >= ocrText.length * 0.5) return r;
 
+      // Level 4: Check if valid route contains the OCR text
       for (const r of busRoutes)
         if (r.includes(ocrText) && ocrText.length >= r.length * 0.6) return r;
 
+      // Level 5: Fuzzy match with Levenshtein distance
       let best = 'None',
         bestD = Infinity;
       for (const r of busRoutes) {
@@ -243,6 +261,11 @@ export function CameraComponent() {
           setModelLoaded(true);
           setModelStatus('Model ready - detecting bus number plates');
           console.log('LiteRT model loaded successfully!');
+
+          // Warm up OCR API in background to avoid cold start on first detection
+          warmupOCRAPI().catch((err) => {
+            console.warn('OCR warmup failed (non-critical):', err);
+          });
         } catch (e: any) {
           const errorMsg = `Init error: ${e?.message ?? e}`;
           setModelStatus(errorMsg);
@@ -650,6 +673,7 @@ export function CameraComponent() {
     const t = performanceMonitor.start(METRICS.OCR);
     try {
       // Use parallel OCR processor which handles immediate matching
+      // The processor now passes individual words to the match callback automatically
       const normalized = await parallelOCRProcessor.processOCR(imgDataUrl);
       console.log(`OCR result: "${normalized}"`);
       return normalized || 'None';
