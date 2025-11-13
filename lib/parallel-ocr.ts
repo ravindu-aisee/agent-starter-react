@@ -12,6 +12,7 @@ interface OCRRequest {
   id: string;
   image: string;
   timestamp: number;
+  abortController?: AbortController;
 }
 
 interface OCRResult {
@@ -19,12 +20,17 @@ interface OCRResult {
   text: string;
   success: boolean;
   processingTime: number;
+  wasAborted?: boolean;
 }
 
 interface OCRQueueItem {
   request: OCRRequest;
   resolve: (result: OCRResult) => void;
   reject: (error: Error) => void;
+}
+
+export interface OCRMatchCallback {
+  (normalizedText: string, rawText: string): boolean;
 }
 
 class ParallelOCRProcessor {
@@ -36,6 +42,9 @@ class ParallelOCRProcessor {
   private batchTimer: NodeJS.Timeout | null = null;
   private cache = new Map<string, OCRResult>();
   private cacheTimeout = 5000; // 5 seconds cache
+  private matchCallback: OCRMatchCallback | null = null;
+  private shouldAbortAll = false;
+  private activeAbortControllers = new Set<AbortController>();
 
   constructor(maxConcurrentRequests: number = 3, batchSize: number = 1, batchTimeout: number = 50) {
     this.maxConcurrentRequests = maxConcurrentRequests;
@@ -44,9 +53,51 @@ class ParallelOCRProcessor {
   }
 
   /**
+   * Set callback function to check if OCR result matches target
+   * Returns true if match found and processing should stop
+   */
+  setMatchCallback(callback: OCRMatchCallback | null) {
+    this.matchCallback = callback;
+  }
+
+  /**
+   * Abort all in-flight OCR requests
+   */
+  abortAll() {
+    console.log('Aborting all OCR requests...');
+    this.shouldAbortAll = true;
+
+    // Abort all active requests
+    this.activeAbortControllers.forEach((controller) => {
+      try {
+        controller.abort();
+      } catch (e) {
+        console.warn('Error aborting controller:', e);
+      }
+    });
+
+    this.activeAbortControllers.clear();
+    this.queue = [];
+    this.processing.clear();
+  }
+
+  /**
+   * Reset abort flag for new detection cycle
+   */
+  reset() {
+    this.shouldAbortAll = false;
+    this.activeAbortControllers.clear();
+  }
+
+  /**
    * Process OCR request with automatic batching and parallelization
    */
   async processOCR(image: string): Promise<string> {
+    if (this.shouldAbortAll) {
+      console.log('Skipping OCR - abort flag set');
+      return 'None';
+    }
+
     const requestId = this.generateRequestId(image);
 
     // Check cache first
@@ -69,10 +120,12 @@ class ParallelOCRProcessor {
     }
 
     return new Promise<string>((resolve, reject) => {
+      const abortController = new AbortController();
       const request: OCRRequest = {
         id: requestId,
         image,
         timestamp: Date.now(),
+        abortController,
       };
 
       this.queue.push({
@@ -130,16 +183,36 @@ class ParallelOCRProcessor {
     const startTime = performance.now();
 
     try {
+      if (this.shouldAbortAll) {
+        console.log(`⏹️ Skipping OCR request ${request.id} - abort flag set`);
+        resolve({
+          id: request.id,
+          text: 'None',
+          success: false,
+          processingTime: 0,
+          wasAborted: true,
+        });
+        return;
+      }
+
       this.processing.add(request.id);
+
+      // Track abort controller
+      if (request.abortController) {
+        this.activeAbortControllers.add(request.abortController);
+      }
+
       console.log(`🔍 Processing OCR request ${request.id}...`);
 
-      // Make API call
+      // Make API call with abort signal
       const response = await fetch('/api/ocr', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
+          Connection: 'keep-alive', // Reuse connections
         },
         body: JSON.stringify({ image: request.image }),
+        signal: request.abortController?.signal,
       });
 
       if (!response.ok) {
@@ -149,13 +222,24 @@ class ParallelOCRProcessor {
       const data = await response.json();
       const processingTime = performance.now() - startTime;
 
-      console.log(`✅ OCR completed in ${processingTime.toFixed(2)}ms: "${data.text}"`);
+      const normalizedText = data.text || 'None';
+      console.log(`✅ OCR completed in ${processingTime.toFixed(2)}ms: "${normalizedText}"`);
+
+      // CRITICAL: Check for match immediately after receiving result
+      if (this.matchCallback && normalizedText && normalizedText !== 'None') {
+        const isMatch = this.matchCallback(normalizedText, data.text);
+        if (isMatch) {
+          console.log(`MATCH FOUND in OCR! "${normalizedText}" - Aborting other requests`);
+          this.abortAll();
+        }
+      }
 
       const result: OCRResult = {
         id: request.id,
-        text: data.text || 'None',
+        text: normalizedText,
         success: data.success,
         processingTime,
+        wasAborted: false,
       };
 
       // Cache result
@@ -164,6 +248,20 @@ class ParallelOCRProcessor {
       resolve(result);
     } catch (error) {
       const processingTime = performance.now() - startTime;
+
+      // Check if this was an abort
+      if (error instanceof Error && error.name === 'AbortError') {
+        console.log(`OCR request ${request.id} was aborted`);
+        resolve({
+          id: request.id,
+          text: 'None',
+          success: false,
+          processingTime,
+          wasAborted: true,
+        });
+        return;
+      }
+
       console.error(
         `❌ OCR request ${request.id} failed after ${processingTime.toFixed(2)}ms:`,
         error
@@ -174,11 +272,17 @@ class ParallelOCRProcessor {
         text: 'None',
         success: false,
         processingTime,
+        wasAborted: false,
       };
 
       reject(error instanceof Error ? error : new Error(String(error)));
     } finally {
       this.processing.delete(request.id);
+
+      // Remove abort controller from tracking
+      if (request.abortController) {
+        this.activeAbortControllers.delete(request.abortController);
+      }
     }
   }
 

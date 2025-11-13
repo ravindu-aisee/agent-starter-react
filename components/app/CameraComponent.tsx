@@ -3,9 +3,10 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import Webcam from 'react-webcam';
 import { useDataChannel } from '@livekit/components-react';
+import { toastAlert } from '@/components/livekit/alert-toast';
+import { parallelOCRProcessor } from '@/lib/parallel-ocr';
 import { METRICS, performanceMonitor } from '@/lib/performance-monitor';
 import { Detection, literTModelManager } from '@/lib/tflite-loader';
-import { toastAlert } from '@/components/livekit/alert-toast';
 
 interface DataChannelMessage {
   type: 'query' | 'response';
@@ -104,7 +105,9 @@ export function CameraComponent() {
           setValidBusRoutes([]);
           validBusRoutesRef.current = [];
         }
-        console.log(`Opening camera for query: ${data.bus_number} (request_id: ${data.request_id})`);
+        console.log(
+          `Opening camera for query: ${data.bus_number} (request_id: ${data.request_id})`
+        );
 
         setCurrentRequestId(data.request_id);
 
@@ -123,9 +126,38 @@ export function CameraComponent() {
         matchFoundRef.current = false;
         adaptiveFrameSkip.current = isMobile ? 3 : 2;
 
+        // Reset OCR processor for new query
+        parallelOCRProcessor.reset();
+
         const normalizedTarget = normalizeBusNumber(data.bus_number);
         targetBusNumberRef.current = normalizedTarget || '';
         console.log(`Target bus number: ${data.bus_number} → Normalized: ${normalizedTarget}`);
+
+        // Set up match callback for immediate detection
+        parallelOCRProcessor.setMatchCallback((normalizedText, rawText) => {
+          const validated = findClosestValidRoute(normalizedText);
+          const isMatch = !!targetBusNumberRef.current && validated === targetBusNumberRef.current;
+
+          if (isMatch) {
+            console.log('IMMEDIATE MATCH DETECTED');
+            console.log(`OCR: "${validated}" === TARGET: "${targetBusNumberRef.current}"`);
+
+            // Set match flag immediately
+            matchFoundRef.current = true;
+
+            // Stop detection loop immediately
+            stopLoop();
+
+            // Trigger TTS immediately (don't wait)
+            playTTSAnnouncement(validated).catch((err) => {
+              console.error('TTS error:', err);
+            });
+
+            return true; // Signal match found
+          }
+
+          return false;
+        });
 
         if (data.bus_number) {
           sendResponse(`Camera started for bus number ${data.bus_number}...`, data.request_id);
@@ -177,9 +209,11 @@ export function CameraComponent() {
 
       if (busRoutes.includes(ocrText)) return ocrText;
 
-      for (const r of busRoutes) if (ocrText.includes(r) && r.length >= ocrText.length * 0.5) return r;
+      for (const r of busRoutes)
+        if (ocrText.includes(r) && r.length >= ocrText.length * 0.5) return r;
 
-      for (const r of busRoutes) if (r.includes(ocrText) && ocrText.length >= r.length * 0.6) return r;
+      for (const r of busRoutes)
+        if (r.includes(ocrText) && ocrText.length >= r.length * 0.6) return r;
 
       let best = 'None',
         bestD = Infinity;
@@ -272,6 +306,11 @@ export function CameraComponent() {
 
   const clearAllStates = () => {
     console.log('Clearing all states…');
+
+    // Abort any in-flight OCR requests
+    parallelOCRProcessor.abortAll();
+    parallelOCRProcessor.setMatchCallback(null);
+
     setPlateDetections([]);
     setOcrResults([]);
     setDetectedBuses(new Map());
@@ -301,10 +340,11 @@ export function CameraComponent() {
         audio.preload = 'none';
         (audio as any).playsInline = true;
         audio.muted = false;
-        
+
         // Load a silent data URL to "prime" the audio element
-        audio.src = 'data:audio/mp3;base64,SUQzBAAAAAAAI1RTU0UAAAAPAAADTGF2ZjU4Ljc2LjEwMAAAAAAAAAAAAAAA//tQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWGluZwAAAA8AAAACAAADhAC7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7//////////////////////////////////////////////////////////////////8AAAAATGF2YzU4LjEzAAAAAAAAAAAAAAAAJAAAAAAAAAAAA4T0LnrfAAAAAAAAAAAAAAAAAAAAAP/7UGQAD/AAAGkAAAAIAAANIAAAAQAAAaQAAAAgAAA0gAAABExBTUUzLjEwMFVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVQ==';
-        
+        audio.src =
+          'data:audio/mp3;base64,SUQzBAAAAAAAI1RTU0UAAAAPAAADTGF2ZjU4Ljc2LjEwMAAAAAAAAAAAAAAA//tQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWGluZwAAAA8AAAACAAADhAC7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7//////////////////////////////////////////////////////////////////8AAAAATGF2YzU4LjEzAAAAAAAAAAAAAAAAJAAAAAAAAAAAA4T0LnrfAAAAAAAAAAAAAAAAAAAAAP/7UGQAD/AAAGkAAAAIAAANIAAAAQAAAaQAAAAgAAA0gAAABExBTUUzLjEwMFVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVQ==';
+
         // Play silence to unlock - this MUST happen during user gesture
         try {
           await audio.play();
@@ -313,7 +353,7 @@ export function CameraComponent() {
         } catch (e) {
           console.warn('[Audio] Play/pause during unlock failed:', e);
         }
-        
+
         primedAudioRef.current = audio;
         console.log('[Audio] Primed audio element for iOS');
       }
@@ -322,7 +362,7 @@ export function CameraComponent() {
         (window as any).AudioContext ||
         (window as any).webkitAudioContext ||
         (window as any).webkitaudioContext;
-      
+
       if (Ctx) {
         if (!audioCtxRef.current) {
           audioCtxRef.current = new Ctx();
@@ -344,7 +384,7 @@ export function CameraComponent() {
     } catch (e) {
       console.warn('[Audio] Unlock failed:', e);
       setAudioReady(true);
-      setAudioHint('Tap again if you still can\'t hear audio.');
+      setAudioHint("Tap again if you still can't hear audio.");
     }
   }, []);
 
@@ -360,7 +400,7 @@ export function CameraComponent() {
       // Show popup notification
       toastAlert({
         title: 'Bus Arrived!',
-        description: `Bus ${busNumber} has arrived.`
+        description: `Bus ${busNumber} has arrived.`,
       });
 
       const response = await fetch('/api/tts', {
@@ -409,7 +449,7 @@ export function CameraComponent() {
         } else {
           // Use primed audio element for iOS - CRITICAL for iOS Safari
           const audio = primedAudioRef.current || new Audio();
-          
+
           // Configure for iOS
           (audio as any).playsInline = true;
           audio.muted = false;
@@ -441,7 +481,9 @@ export function CameraComponent() {
       } catch (err: any) {
         console.error('Error playing TTS:', err);
         if (String(err?.name || err).includes('NotAllowedError')) {
-          setAudioHint('Tap "Enable sound" to allow audio, then I\'ll speak automatically next time.');
+          setAudioHint(
+            'Tap "Enable sound" to allow audio, then I\'ll speak automatically next time.'
+          );
         }
         announcedBusesRef.current.delete(busNumber);
       }
@@ -480,7 +522,8 @@ export function CameraComponent() {
     const g = c.getContext('2d');
     if (!g) return '';
     g.drawImage(video, vx, vy, vw, vh, 0, 0, vw, vh);
-    return c.toDataURL('image/jpeg', 0.95);
+    // Reduced quality from 0.95 to 0.85 for smaller payload and faster network transfer
+    return c.toDataURL('image/jpeg', 0.85);
   };
 
   async function saveImageAsync(imageDataUrl: string, filename: string): Promise<void> {
@@ -556,7 +599,7 @@ export function CameraComponent() {
 
       const corner = Math.min(bw, bh) * 0.15;
       ctx.lineWidth = 4;
-      
+
       ctx.beginPath();
       ctx.moveTo(x, y + corner);
       ctx.lineTo(x, y);
@@ -606,21 +649,10 @@ export function CameraComponent() {
   async function runOCR(imgDataUrl: string): Promise<string> {
     const t = performanceMonitor.start(METRICS.OCR);
     try {
-      const response = await fetch('/api/ocr', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ image: imgDataUrl }),
-      });
-
-      if (!response.ok) return 'None';
-
-      const result: OCRResult = await response.json();
-      if (result.success && result.text) {
-        const normalized = normalizeBusNumber(result.text);
-        console.log(`OCR raw: "${result.text}" → normalized: "${normalized}"`);
-        return normalized || 'None';
-      }
-      return 'None';
+      // Use parallel OCR processor which handles immediate matching
+      const normalized = await parallelOCRProcessor.processOCR(imgDataUrl);
+      console.log(`OCR result: "${normalized}"`);
+      return normalized || 'None';
     } catch (error) {
       console.error('OCR processing error:', error);
       return 'None';
@@ -743,7 +775,11 @@ export function CameraComponent() {
 
       await Promise.all(
         boxes.map(async (det) => {
-          if (matchFoundRef.current) return;
+          // Early exit if match already found
+          if (matchFoundRef.current) {
+            console.log('⏹️ Skipping detection - match already found');
+            return;
+          }
 
           if (det.confidence < 0.5) {
             console.log(
@@ -763,43 +799,27 @@ export function CameraComponent() {
 
           try {
             const crop = cropWithPadding(video, det.bbox, 0.4);
-            const ts = Date.now();
-            const label = det.class_name ?? `cls${det.class_id}`;
 
             const ocrStart = performance.now();
+            // OCR processing with automatic match detection via callback
             const ocrNorm = await runOCR(crop);
-            const validated = findClosestValidRoute(ocrNorm);
             const ocrMs = performance.now() - ocrStart;
 
             processedObjectsRef.current.set(objectId, Date.now());
             processingIdsRef.current.delete(objectId);
 
+            // Validate the result
+            const validated = findClosestValidRoute(ocrNorm);
+
             if (!validated || validated === 'None') return;
 
-            const currentValidRoutes = validBusRoutesRef.current;
-            if (!currentValidRoutes || currentValidRoutes.length === 0) {
-              console.warn('No valid bus routes available, skipping validation');
+            // Check if match was found during OCR (callback sets this)
+            if (matchFoundRef.current) {
+              console.log('⏹️ Match found during OCR processing, stopping');
               return;
             }
 
-            const isMatch = !!targetBus && validated === targetBus;
-
-            console.log('='.repeat(60));
-            console.log(
-              `COMPARISON: OCR="${validated}" vs TARGET="${targetBus}" → ${
-                isMatch ? '✅ MATCH' : '❌ NO MATCH'
-              }`
-            );
-            console.log('='.repeat(60));
-
-            if (isMatch) {
-              matchFoundRef.current = true;
-              console.log('MATCH FOUND! Stopping all processing...');
-              stopLoop();
-              await playTTSAnnouncement(validated);
-              return;
-            }
-
+            // Update UI with detection
             setDetectedBuses((prev) => new Map(prev).set(objectId, validated));
             setOcrResults((prev) => [validated, ...prev].slice(0, 5));
           } catch (err) {
