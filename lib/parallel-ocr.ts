@@ -30,7 +30,7 @@ interface OCRQueueItem {
 }
 
 export interface OCRMatchCallback {
-  (normalizedText: string, rawText: string): boolean;
+  (normalizedText: string, rawText: string, individualWords?: string[]): boolean;
 }
 
 class ParallelOCRProcessor {
@@ -223,11 +223,17 @@ class ParallelOCRProcessor {
       const processingTime = performance.now() - startTime;
 
       const normalizedText = data.text || 'None';
-      console.log(`✅ OCR completed in ${processingTime.toFixed(2)}ms: "${normalizedText}"`);
+      const individualWords = data.individualWords || [];
+      console.log(`OCR completed in ${processingTime.toFixed(2)}ms: "${normalizedText}"`);
+      if (individualWords.length > 0) {
+        console.log(
+          `   Individual words: [${individualWords.map((w: string) => `"${w}"`).join(', ')}]`
+        );
+      }
 
       // CRITICAL: Check for match immediately after receiving result
       if (this.matchCallback && normalizedText && normalizedText !== 'None') {
-        const isMatch = this.matchCallback(normalizedText, data.text);
+        const isMatch = this.matchCallback(normalizedText, data.text, individualWords);
         if (isMatch) {
           console.log(`MATCH FOUND in OCR! "${normalizedText}" - Aborting other requests`);
           this.abortAll();
