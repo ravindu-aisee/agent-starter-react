@@ -1,4 +1,5 @@
 {
+  "homepage": "https://ravindu-aisee.github.io/agent-starter-react",
   "name": "agent-starter-react",
   "version": "0.1.0",
   "private": true,
@@ -8,7 +9,9 @@
     "start": "next start",
     "lint": "next lint",
     "format": "prettier --write .",
-    "format:check": "prettier --check ."
+    "format:check": "prettier --check .",
+    "predeploy": "pnpm run build",
+    "deploy": "vercel --prod"
   },
   "dependencies": {
     "@google-cloud/text-to-speech": "^6.4.0",
@@ -55,11 +58,13 @@
     "eslint-config-prettier": "^10.1.5",
     "eslint-plugin-import": "^2.31.0",
     "eslint-plugin-prettier": "^5.5.0",
+    "gh-pages": "^6.3.0",
     "prettier": "^3.4.2",
     "prettier-plugin-tailwindcss": "^0.6.11",
     "tailwindcss": "^4",
     "tw-animate-css": "^1.3.0",
-    "typescript": "^5"
+    "typescript": "^5",
+    "vercel": "^48.9.0"
   },
   "packageManager": "pnpm@9.15.9"
 }
