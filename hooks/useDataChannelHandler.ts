@@ -27,8 +27,8 @@ export function useDataChannelHandler(options: DataChannelHandlerOptions = {}) {
     try {
       const decoder = new TextDecoder();
       const data: DataChannelMessage = JSON.parse(decoder.decode(message.payload));
-      
-      console.log('📨 [DataChannel] Received message:', data);
+
+      console.log('[DataChannel] Received message:', data);
 
       // Route message based on type
       switch (data.type) {
@@ -39,11 +39,11 @@ export function useDataChannelHandler(options: DataChannelHandlerOptions = {}) {
           onResponse?.(data);
           break;
         default:
-          console.warn('⚠️ [DataChannel] Unknown message type:', data);
+          console.warn('[DataChannel] Unknown message type:', data);
       }
     } catch (error) {
       const err = error instanceof Error ? error : new Error(String(error));
-      console.error('❌ [DataChannel] Failed to parse message:', err);
+      console.error('[DataChannel] Failed to parse message:', err);
       onError?.(err);
     }
   });
@@ -54,7 +54,7 @@ export function useDataChannelHandler(options: DataChannelHandlerOptions = {}) {
   const sendResponse = useCallback(
     (result: string, additionalData?: Partial<DataChannelMessage>) => {
       if (!send) {
-        console.error('❌ [DataChannel] Send function not available');
+        console.error('[DataChannel] Send function not available');
         return false;
       }
 
@@ -65,16 +65,16 @@ export function useDataChannelHandler(options: DataChannelHandlerOptions = {}) {
         ...additionalData,
       };
 
-      console.log('📤 [DataChannel] Sending response:', response);
+      console.log('[DataChannel] Sending response:', response);
 
       try {
         const encoder = new TextEncoder();
         const payload = encoder.encode(JSON.stringify(response));
         send(payload, { reliable: true });
-        console.log('✅ [DataChannel] Response sent successfully');
+        console.log('[DataChannel] Response sent successfully');
         return true;
       } catch (error) {
-        console.error('❌ [DataChannel] Failed to send response:', error);
+        console.error('[DataChannel] Failed to send response:', error);
         onError?.(error instanceof Error ? error : new Error(String(error)));
         return false;
       }
@@ -100,13 +100,13 @@ export function useDataChannelHandler(options: DataChannelHandlerOptions = {}) {
         ...additionalData,
       };
 
-      console.log('📤 [DataChannel] Sending query:', message);
+      console.log('[DataChannel] Sending query:', message);
 
       try {
         const encoder = new TextEncoder();
         const payload = encoder.encode(JSON.stringify(message));
         send(payload, { reliable: true });
-        console.log('✅ [DataChannel] Query sent successfully');
+        console.log('[DataChannel] Query sent successfully');
         return true;
       } catch (error) {
         console.error('❌ [DataChannel] Failed to send query:', error);
