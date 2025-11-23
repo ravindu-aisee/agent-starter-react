@@ -923,7 +923,7 @@ export function CameraComponent() {
         }
       });
 
-      // Fire all pipelines in parallel - DO NOT WAIT
+      // Fire all pipelines in parallel - DO NOT WAITt
       // This ensures all detections start processing simultaneously
       // First one to match will trigger TTS and abort the rest
       Promise.allSettled(parallelPipelines).catch((err) => {
