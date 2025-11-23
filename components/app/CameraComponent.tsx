@@ -500,9 +500,9 @@ export function CameraComponent() {
         const hasWebAudio =
           typeof window !== 'undefined' &&
           !!(
-            (window as any).AudioContext ||
-            (window as any).webkitAudioContext ||
-            (window as any).webkitaudioContext
+            (window as Window & { AudioContext?: unknown; webkitAudioContext?: unknown; webkitaudioContext?: unknown }).AudioContext ||
+            (window as Window & { AudioContext?: unknown; webkitAudioContext?: unknown; webkitaudioContext?: unknown }).webkitAudioContext ||
+            (window as Window & { AudioContext?: unknown; webkitAudioContext?: unknown; webkitaudioContext?: unknown }).webkitaudioContext
           );
 
         // Prefer WebAudio when unlocked (best on iOS)
@@ -533,7 +533,7 @@ export function CameraComponent() {
           const audio = primedAudioRef.current || new Audio();
 
           // Configure for iOS
-          (audio as any).playsInline = true;
+          (audio as HTMLAudioElement & { playsInline?: boolean }).playsInline = true;
           audio.muted = false;
           audio.preload = 'auto';
 
@@ -563,9 +563,10 @@ export function CameraComponent() {
             announcedBusesRef.current.delete(busNumber);
           };
         }
-      } catch (err: any) {
+      } catch (err: unknown) {
         console.error('Error playing TTS:', err);
-        if (String(err?.name || err).includes('NotAllowedError')) {
+        const errorName = err instanceof Error ? err.name : String(err);
+        if (errorName.includes('NotAllowedError')) {
           setAudioHint(
             'Tap "Enable sound" to allow audio, then I\'ll speak automatically next time.'
           );
@@ -628,43 +629,6 @@ export function CameraComponent() {
       console.error('Save image network error:', error);
     }
   }
-
-  const annotateAndSaveImage = (
-    imageData: string,
-    text: string,
-    confidence: number,
-    filename: string
-  ) => {
-    const img = new Image();
-    img.onload = () => {
-      const canvas = document.createElement('canvas');
-      canvas.width = img.width;
-      canvas.height = img.height;
-      const ctx = canvas.getContext('2d');
-      if (!ctx) return;
-
-      ctx.drawImage(img, 0, 0);
-
-      const fontSize = Math.max(20, Math.floor(img.height / 10));
-      ctx.font = `bold ${fontSize}px Arial`;
-      ctx.fillStyle = 'rgba(0, 255, 0, 0.9)';
-      ctx.strokeStyle = 'rgba(0, 0, 0, 0.8)';
-      ctx.lineWidth = 3;
-
-      const label = `${text} (${(confidence * 100).toFixed(1)}%)`;
-      const tm = ctx.measureText(label);
-      const pad = 10;
-
-      ctx.fillRect(0, 0, tm.width + pad * 2, fontSize + pad * 2);
-      ctx.strokeText(label, pad, fontSize + pad / 2);
-      ctx.fillStyle = '#000000';
-      ctx.fillText(label, pad, fontSize + pad / 2);
-
-      const annotated = canvas.toDataURL('image/jpeg', 0.95);
-      saveImageAsync(annotated, filename);
-    };
-    img.src = imageData;
-  };
 
   function drawBoxes(dets: Detection[], w: number, h: number) {
     const canvas = canvasRef.current;
@@ -778,7 +742,7 @@ export function CameraComponent() {
 
       const infId = performanceMonitor.start(METRICS.INFERENCE);
       const raw = await literTModelManager.runInference(model, inputTensor);
-      const inferenceTime = performanceMonitor.end(infId);
+      performanceMonitor.end(infId);
 
       const postId = performanceMonitor.start(METRICS.POSTPROCESSING);
       const boxes = literTModelManager.processDetections(
@@ -941,6 +905,10 @@ export function CameraComponent() {
     normalizeBusNumber,
     findClosestValidRoute,
     frameRate,
+    ALLOWED,
+    CLASS_NAMES,
+    YOLO_CONF,
+    isMobile,
   ]);
 
   // ---------------------------------------- UI ----------------------------------------
@@ -976,7 +944,7 @@ export function CameraComponent() {
         >
           <div>{modelStatus}</div>
           <div style={{ fontSize: '.9rem', marginTop: 10, opacity: 0.8 }}>
-            Loading...Please wait! 
+            Loading...Please wait!
           </div>
         </div>
       )}

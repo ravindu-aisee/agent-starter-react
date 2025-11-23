@@ -1,5 +1,4 @@
 import { NextRequest, NextResponse } from 'next/server';
-import path from 'path';
 import vision from '@google-cloud/vision';
 
 // Client is initialized once and reused across requests
@@ -78,9 +77,6 @@ export async function POST(request: NextRequest) {
 
     // First detection contains all text
     const fullText = detections[0]?.description || '';
-
-    detections.slice(1).forEach((text, index) => {
-    });
 
     // Extract individual words (excluding the first full-text detection)
     const individualWords = detections

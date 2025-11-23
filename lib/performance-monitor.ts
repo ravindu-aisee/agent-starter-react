@@ -9,7 +9,7 @@ interface PerformanceMetric {
   startTime: number;
   endTime?: number;
   duration?: number;
-  metadata?: Record<string, any>;
+  metadata?: Record<string, unknown>;
 }
 
 interface PerformanceStats {
@@ -29,7 +29,7 @@ class PerformanceMonitor {
   /**
    * Start timing a metric
    */
-  start(metricName: string, metadata?: Record<string, any>): string {
+  start(metricName: string, metadata?: Record<string, unknown>): string {
     const id = `${metricName}_${Date.now()}_${Math.random()}`;
     const startTime = performance.now();
 
@@ -87,7 +87,7 @@ class PerformanceMonitor {
   /**
    * Record an instant metric
    */
-  record(metricName: string, value: number, metadata?: Record<string, any>) {
+  record(metricName: string, value: number, metadata?: Record<string, unknown>) {
     const metric: PerformanceMetric = {
       name: metricName,
       startTime: performance.now(),
