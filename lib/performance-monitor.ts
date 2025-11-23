@@ -72,7 +72,7 @@ class PerformanceMonitor {
     this.activeTimers.delete(id);
 
     // Find and update the metric
-    for (const [metricName, metrics] of this.metrics) {
+    for (const metrics of this.metrics.values()) {
       const metric = metrics.find((m) => !m.endTime && Math.abs(m.startTime - startTime) < 1);
       if (metric) {
         metric.endTime = endTime;

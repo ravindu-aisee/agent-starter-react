@@ -336,11 +336,13 @@ export function CameraComponent() {
     } else {
       stopLoop();
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [showCamera, modelLoaded]);
 
   const startLoop = useCallback(() => {
     stopLoop();
     detectionIntervalRef.current = setInterval(runDetection, DETECTION_INTERVAL_MS);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [DETECTION_INTERVAL_MS]);
 
   const stopLoop = useCallback(() => {
@@ -412,7 +414,7 @@ export function CameraComponent() {
       if (!primedAudioRef.current) {
         const audio = new Audio();
         audio.preload = 'none';
-        (audio as any).playsInline = true;
+        (audio as HTMLAudioElement & { playsInline?: boolean }).playsInline = true;
         audio.muted = false;
 
         // Load a silent data URL to "prime" the audio element
@@ -433,13 +435,31 @@ export function CameraComponent() {
       }
 
       const Ctx =
-        (window as any).AudioContext ||
-        (window as any).webkitAudioContext ||
-        (window as any).webkitaudioContext;
+        (
+          window as Window & {
+            AudioContext?: unknown;
+            webkitAudioContext?: unknown;
+            webkitaudioContext?: unknown;
+          }
+        ).AudioContext ||
+        (
+          window as Window & {
+            AudioContext?: unknown;
+            webkitAudioContext?: unknown;
+            webkitaudioContext?: unknown;
+          }
+        ).webkitAudioContext ||
+        (
+          window as Window & {
+            AudioContext?: unknown;
+            webkitAudioContext?: unknown;
+            webkitaudioContext?: unknown;
+          }
+        ).webkitaudioContext;
 
       if (Ctx) {
         if (!audioCtxRef.current) {
-          audioCtxRef.current = new Ctx();
+          audioCtxRef.current = new (Ctx as typeof AudioContext)();
         }
         const ctx = audioCtxRef.current as AudioContext;
 
@@ -492,17 +512,33 @@ export function CameraComponent() {
 
       const audioBlob = await response.blob();
       const blobTime = performance.now() - ttsStartTime;
-      console.log(
-        `[TTS] Audio blob ready in ${blobTime.toFixed(2)}ms (${audioBlob.size} bytes)`
-      );
+      console.log(`[TTS] Audio blob ready in ${blobTime.toFixed(2)}ms (${audioBlob.size} bytes)`);
 
       try {
         const hasWebAudio =
           typeof window !== 'undefined' &&
           !!(
-            (window as Window & { AudioContext?: unknown; webkitAudioContext?: unknown; webkitaudioContext?: unknown }).AudioContext ||
-            (window as Window & { AudioContext?: unknown; webkitAudioContext?: unknown; webkitaudioContext?: unknown }).webkitAudioContext ||
-            (window as Window & { AudioContext?: unknown; webkitAudioContext?: unknown; webkitaudioContext?: unknown }).webkitaudioContext
+            (
+              window as Window & {
+                AudioContext?: unknown;
+                webkitAudioContext?: unknown;
+                webkitaudioContext?: unknown;
+              }
+            ).AudioContext ||
+            (
+              window as Window & {
+                AudioContext?: unknown;
+                webkitAudioContext?: unknown;
+                webkitaudioContext?: unknown;
+              }
+            ).webkitAudioContext ||
+            (
+              window as Window & {
+                AudioContext?: unknown;
+                webkitAudioContext?: unknown;
+                webkitaudioContext?: unknown;
+              }
+            ).webkitaudioContext
           );
 
         // Prefer WebAudio when unlocked (best on iOS)
@@ -612,23 +648,23 @@ export function CameraComponent() {
     return c.toDataURL('image/jpeg', 0.75);
   };
 
-  async function saveImageAsync(imageDataUrl: string, filename: string): Promise<void> {
-    try {
-      const response = await fetch('/api/save-image', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ image: imageDataUrl, filename }),
-      });
-      if (response.ok) {
-        const result = await response.json();
-        console.log(`Image saved: ${result.path}`);
-      } else {
-        console.error('Save image error:', response.statusText);
-      }
-    } catch (error) {
-      console.error('Save image network error:', error);
-    }
-  }
+  // async function saveImageAsync(imageDataUrl: string, filename: string): Promise<void> {
+  //   try {
+  //     const response = await fetch('/api/save-image', {
+  //       method: 'POST',
+  //       headers: { 'Content-Type': 'application/json' },
+  //       body: JSON.stringify({ image: imageDataUrl, filename }),
+  //     });
+  //     if (response.ok) {
+  //       const result = await response.json();
+  //       console.log(`Image saved: ${result.path}`);
+  //     } else {
+  //       console.error('Save image error:', response.statusText);
+  //     }
+  //   } catch (error) {
+  //     console.error('Save image network error:', error);
+  //   }
+  // }
 
   function drawBoxes(dets: Detection[], w: number, h: number) {
     const canvas = canvasRef.current;
@@ -754,7 +790,6 @@ export function CameraComponent() {
         padY,
         YOLO_CONF,
         YOLO_IOU,
-        INPUT_SIZE,
         {
           classNames: CLASS_NAMES,
           allowedClassNames: ALLOWED,
@@ -898,6 +933,7 @@ export function CameraComponent() {
     } finally {
       performanceMonitor.end(pipelineTimer);
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [
     generateObjectId,
     sendResponse,
