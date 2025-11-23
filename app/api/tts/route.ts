@@ -1,12 +1,29 @@
 // app/api/tts/route.ts
 import { NextRequest, NextResponse } from 'next/server';
-import { join } from 'path';
+export const runtime = 'nodejs';
+export const dynamic = 'force-dynamic'; // TTS should never be statically optimized/cached
+
+// Import Google Cloud TTS
+const textToSpeech = require('@google-cloud/text-to-speech')
+
+
+// Use credentials from environment variables
+const client = new textToSpeech.TextToSpeechClient({
+  credentials: {
+    client_email: process.env.VISION_OCR_CLIENT_EMAIL,
+    private_key: process.env.VISION_OCR_PRIVATE_KEY?.replace(/\\n/g, '\n'),
+  },
+  projectId: process.env.VISION_OCR_PROJECT_ID,
+});
+
+type TTSBody = { text?: string };
 
 export async function POST(request: NextRequest) {
+  const requestStartTime = performance.now();
   try {
-    const { text } = await request.json();
+    const { text } = await request.json() as TTSBody;
 
-    if (!text) {
+    if (!text || !text.trim()) {
       return NextResponse.json(
         { success: false, error: 'Missing text parameter' },
         { status: 400 }
@@ -14,18 +31,6 @@ export async function POST(request: NextRequest) {
     }
 
     console.log(`TTS Request: "${text}"`);
-
-    // Import Google Cloud TTS (only on server-side)
-    const textToSpeech = require('@google-cloud/text-to-speech');
-
-    // Use credentials from environment variables
-    const client = new textToSpeech.TextToSpeechClient({
-      credentials: {
-        client_email: process.env.VISION_OCR_CLIENT_EMAIL,
-        private_key: process.env.VISION_OCR_PRIVATE_KEY?.replace(/\\n/g, '\n'),
-      },
-      projectId: process.env.VISION_OCR_PROJECT_ID,
-    });
 
     // Construct the request
     const ttsRequest = {
@@ -37,6 +42,7 @@ export async function POST(request: NextRequest) {
     };
 
     console.log('Calling Google Cloud TTS API...');
+    const apiCallStart = performance.now();
 
     // Performs the text-to-speech request
     const [response] = await client.synthesizeSpeech(ttsRequest);
@@ -45,7 +51,11 @@ export async function POST(request: NextRequest) {
       throw new Error('No audio content received from TTS API');
     }
 
-    console.log(`TTS audio generated successfully (${response.audioContent.length} bytes)`);
+    const apiCallTime = performance.now() - apiCallStart;
+    const totalTime = performance.now() - requestStartTime;
+    console.log(
+      `TTS audio generated successfully in ${totalTime.toFixed(2)}ms)`
+    );
 
     // Return the audio content as MP3
     return new NextResponse(response.audioContent, {

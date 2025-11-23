@@ -62,7 +62,7 @@ class PerformanceMonitor {
   end(id: string): number {
     const startTime = this.activeTimers.get(id);
     if (!startTime) {
-      console.warn(`⚠️ No active timer found for ID: ${id}`);
+      console.warn(`No active timer found for ID: ${id}`);
       return 0;
     }
 
@@ -160,7 +160,7 @@ class PerformanceMonitor {
    * Log performance summary
    */
   logSummary() {
-    console.log('📊 Performance Summary:');
+    console.log('Performance Summary:');
     console.log('━'.repeat(80));
 
     const allStats = this.getAllStats();
