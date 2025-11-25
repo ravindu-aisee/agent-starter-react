@@ -80,6 +80,7 @@ class ParallelOCRProcessor {
   private queue: QueuedPipeline[] = [];
   private runningCount = 0;
   private threadTimingLogs: ThreadTimingLog[] = [];
+  private requestedBusNumbers: Set<string> = new Set();
 
   constructor(maxConcurrentThreads: number = 10) {
     this.maxConcurrentThreads = maxConcurrentThreads;
@@ -107,6 +108,14 @@ class ParallelOCRProcessor {
    */
   setShouldAbortCheck(callback: ShouldAbortCheck | null) {
     this.shouldAbortCheck = callback;
+  }
+
+  /**
+   * Set user-requested bus numbers for lookup during OCR processing
+   */
+  setRequestedBusNumbers(busNumbers: string[]) {
+    this.requestedBusNumbers = new Set(busNumbers);
+    console.log(`Requested bus numbers set: [${Array.from(this.requestedBusNumbers).join(', ')}]`);
   }
 
   /**
@@ -155,7 +164,8 @@ class ParallelOCRProcessor {
     this.queue = [];
     this.runningCount = 0;
     this.threadTimingLogs = [];
-    console.log('🔄 OCR processor reset for new detection cycle');
+    this.requestedBusNumbers.clear();
+    console.log('OCR processor reset for new detection cycle');
   }
 
   /**
@@ -214,7 +224,7 @@ class ParallelOCRProcessor {
   }
 
   /**
-   * Actually run the pipeline with detailed timing logs
+   * Actually run the pipeline
    */
   private async runPipeline(
     context: OCRPipelineContext,
@@ -322,16 +332,106 @@ class ParallelOCRProcessor {
         };
       }
 
-      // STEP 4: Validate against valid bus routes (within same thread)
-      if (!this.validationCallback) {
-        console.warn(`[Thread ${objectId}] No validation callback set!`);
+      // // STEP 4: Validate against valid bus routes (within same thread)
+      // if (!this.validationCallback) {
+      //   console.warn(`[Thread ${objectId}] No validation callback set!`);
+      //   timingLog.endTime = performance.now();
+      //   timingLog.totalDuration = timingLog.endTime - startTime;
+      //   this.threadTimingLogs.push(timingLog);
+
+      //   return {
+      //     objectId,
+      //     text: normalizedText,
+      //     individualWords,
+      //     success: data.success,
+      //     processingTime: timingLog.totalDuration,
+      //     wasAborted: false,
+      //     timingLog,
+      //   };
+      // }
+
+      // console.log(`[Thread ${objectId}] Validating OCR result...`);
+      // timingLog.validationStartTime = performance.now();
+      // const validatedBusNumber = this.validationCallback(normalizedText, individualWords);
+      // timingLog.validationEndTime = performance.now();
+      // timingLog.validationDuration = timingLog.validationEndTime - timingLog.validationStartTime;
+
+      // console.log(
+      //   `[Thread ${objectId}] Validation result: "${validatedBusNumber}" (${timingLog.validationDuration.toFixed(2)}ms)`
+      // );
+
+      // STEP 5: Check individual words for matches FIRST using O(1) Set lookup
+      // This allows any individual word match to trigger immediate abort + TTS
+      let matchFoundInIndividualWords = false;
+      let matchedWord = '';
+
+      if (
+        individualWords.length > 0 &&
+        this.requestedBusNumbers.size > 0 &&
+        this.matchCallback &&
+        !this.shouldAbortAll &&
+        (!this.shouldAbortCheck || !this.shouldAbortCheck())
+      ) {
+        console.log(`[Thread ${objectId}] Checking individual words against requested bus numbers`);
+
+        // Check each individual word
+        for (const word of individualWords) {
+          if (!word || word === 'None') continue;
+
+          // O(1) lookup: Check if this word is in requested bus numbers
+          if (this.requestedBusNumbers.has(word)) {
+            console.log(
+              `[Thread ${objectId}]  Found requested bus number in individual words: "${word}"`
+            );
+
+            matchedWord = word;
+            timingLog.matchCheckTime = performance.now();
+
+            try {
+              // Create timing trigger only (abort is handled by match callback)
+              const ttsTrigger = async () => {
+                timingLog.ttsTriggeredTime = performance.now();
+                timingLog.detectionToTTSDuration = timingLog.ttsTriggeredTime - detectionTime;
+                console.log(
+                  `[Thread ${objectId}] TTS TRIGGER CALLED! Total latency (detection→TTS call): ${timingLog.detectionToTTSDuration.toFixed(2)}ms`
+                );
+              };
+
+              // Fire match callback without waiting (it handles abort + TTS internally)
+              // This ensures minimal latency - we don't block this thread
+              this.matchCallback(word, objectId, ttsTrigger).catch((error) => {
+                console.error(
+                  `❌ [Thread ${objectId}] Match callback error for word "${word}":`,
+                  error
+                );
+              });
+
+              // Match found - mark for early return
+              matchFoundInIndividualWords = true;
+              break; // Stop checking other words
+            } catch (error) {
+              console.error(
+                `❌ [Thread ${objectId}] Match callback error for word "${word}":`,
+                error
+              );
+            }
+          }
+        }
+      }
+
+      // STEP 6: If match was found in individual words, return early
+      if (matchFoundInIndividualWords) {
         timingLog.endTime = performance.now();
         timingLog.totalDuration = timingLog.endTime - startTime;
         this.threadTimingLogs.push(timingLog);
 
+        console.log(
+          `[Thread ${objectId}] Match found in individual words: "${matchedWord}" (${timingLog.totalDuration.toFixed(2)}ms)`
+        );
+
         return {
           objectId,
-          text: normalizedText,
+          text: matchedWord,
           individualWords,
           success: data.success,
           processingTime: timingLog.totalDuration,
@@ -340,64 +440,71 @@ class ParallelOCRProcessor {
         };
       }
 
-      console.log(`[Thread ${objectId}] Validating OCR result...`);
-      timingLog.validationStartTime = performance.now();
-      const validatedBusNumber = this.validationCallback(normalizedText, individualWords);
-      timingLog.validationEndTime = performance.now();
-      timingLog.validationDuration = timingLog.validationEndTime - timingLog.validationStartTime;
-
-      console.log(
-        `[Thread ${objectId}] Validation result: "${validatedBusNumber}" (${timingLog.validationDuration.toFixed(2)}ms)`
-      );
-
-      // STEP 5: If validated and match callback exists, check for match
-      if (
-        validatedBusNumber &&
-        validatedBusNumber !== 'None' &&
-        this.matchCallback &&
-        !this.shouldAbortAll &&
-        (!this.shouldAbortCheck || !this.shouldAbortCheck())
-      ) {
-        console.log(
-          `[Thread ${objectId}] Valid result found: "${validatedBusNumber}" - checking match...`
-        );
-
-        timingLog.matchCheckTime = performance.now();
-
-        // CRITICAL: Call match callback which will check if this matches target
-        // Pass TTS trigger to be called IMMEDIATELY if match found (within same thread)
-        try {
-          // Create TTS trigger function that records timing
-          const ttsTrigger = async () => {
-            timingLog.ttsTriggeredTime = performance.now();
-            timingLog.detectionToTTSDuration = timingLog.ttsTriggeredTime - detectionTime;
-            console.log(
-              `[Thread ${objectId}] TTS TRIGGER CALLED! Total latency (detection→TTS call): ${timingLog.detectionToTTSDuration.toFixed(2)}ms`
-            );
-          };
-
-          // Match callback will call ttsTrigger if match found
-          await this.matchCallback(validatedBusNumber, objectId, ttsTrigger);
-        } catch (error) {
-          console.error(`❌ [Thread ${objectId}] Match callback error:`, error);
-        }
-      }
-
+      // STEP 7: Complete timing log and return for non-match cases
       timingLog.endTime = performance.now();
       timingLog.totalDuration = timingLog.endTime - startTime;
       this.threadTimingLogs.push(timingLog);
 
-      // Log detailed breakdown
-      console.log(
-        `[Thread ${objectId}] Pipeline completed in ${timingLog.totalDuration.toFixed(2)}ms`
-      );
-      console.log(
-        `Breakdown: Queue=${(queueWaitTime || 0).toFixed(0)}ms | OCR=${timingLog.ocrDuration?.toFixed(0)}ms | Validation=${timingLog.validationDuration?.toFixed(0)}ms`
-      );
+      // // STEP 8: If no match in individual words, check the validated full result (COMMENTED OUT)
+      // if (
+      //   validatedBusNumber &&
+      //   validatedBusNumber !== 'None' &&
+      //   this.matchCallback &&
+      //   !this.shouldAbortAll &&
+      //   (!this.shouldAbortCheck || !this.shouldAbortCheck())
+      // ) {
+      //   console.log(
+      //     `[Thread ${objectId}] Valid result found: "${validatedBusNumber}" - checking match...`
+      //   );
+
+      //   timingLog.matchCheckTime = performance.now();
+
+      //   // CRITICAL: Call match callback which will check if this matches target
+      //   // Pass TTS trigger to be called IMMEDIATELY if match found (within same thread)
+      //   try {
+      //     // Create abort and TTS functions that will run in parallel
+      //     const abortOtherThreads = async () => {
+      //       console.log(
+      //         `[Thread ${objectId}]  Aborting other threads (match found: "${validatedBusNumber}")`
+      //       );
+      //       this.abortAll();
+      //     };
+
+      //     const ttsTrigger = async () => {
+      //       timingLog.ttsTriggeredTime = performance.now();
+      //       timingLog.detectionToTTSDuration = timingLog.ttsTriggeredTime - detectionTime;
+      //       console.log(
+      //         `[Thread ${objectId}] TTS TRIGGER CALLED! Total latency (detection→TTS call): ${timingLog.detectionToTTSDuration.toFixed(2)}ms`
+      //       );
+      //     };
+
+      //     // Combined trigger that runs abort and TTS in parallel
+      //     const combinedTrigger = async () => {
+      //       await Promise.all([abortOtherThreads(), ttsTrigger()]);
+      //     };
+
+      //     // Match callback will call combinedTrigger if match found
+      //     await this.matchCallback(validatedBusNumber, objectId, combinedTrigger);
+      //   } catch (error) {
+      //     console.error(` [Thread ${objectId}] Match callback error:`, error);
+      //   }
+      // }
+
+      // timingLog.endTime = performance.now();
+      // timingLog.totalDuration = timingLog.endTime - startTime;
+      // this.threadTimingLogs.push(timingLog);
+
+      // // Log detailed breakdown
+      // console.log(
+      //   `[Thread ${objectId}] Pipeline completed in ${timingLog.totalDuration.toFixed(2)}ms`
+      // );
+      // console.log(
+      //   `Breakdown: Queue=${(queueWaitTime || 0).toFixed(0)}ms | OCR=${timingLog.ocrDuration?.toFixed(0)}ms | Validation=${timingLog.validationDuration?.toFixed(0)}ms`
+      // );
 
       return {
         objectId,
-        text: validatedBusNumber,
+        text: individualWords.join(' '),
         individualWords,
         success: data.success,
         processingTime: timingLog.totalDuration,
@@ -566,5 +673,5 @@ class ParallelOCRProcessor {
   }
 }
 
-// Singleton instance with max 10 concurrent threads
+// Singleton instance with max 6 concurrent threads
 export const parallelOCRProcessor = new ParallelOCRProcessor(10);

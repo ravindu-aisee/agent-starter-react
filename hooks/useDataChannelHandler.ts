@@ -4,7 +4,7 @@ import { useDataChannel } from '@livekit/components-react';
 interface DataChannelMessage {
   type: 'query' | 'response';
   query?: string;
-  bus_number?: string;
+  bus_numbers?: string[];
   timestamp?: number;
   result?: string;
 }
@@ -86,7 +86,7 @@ export function useDataChannelHandler(options: DataChannelHandlerOptions = {}) {
    * Send a query to the AI agent (if needed for frontend-initiated communication)
    */
   const sendQuery = useCallback(
-    (query: string, bus_number?: string, additionalData?: Partial<DataChannelMessage>) => {
+    (query: string, bus_numbers?: string[], additionalData?: Partial<DataChannelMessage>) => {
       if (!send) {
         console.error('❌ [DataChannel] Send function not available');
         return false;
@@ -95,7 +95,7 @@ export function useDataChannelHandler(options: DataChannelHandlerOptions = {}) {
       const message: DataChannelMessage = {
         type: 'query',
         query,
-        bus_number,
+        bus_numbers,
         timestamp: Date.now(),
         ...additionalData,
       };

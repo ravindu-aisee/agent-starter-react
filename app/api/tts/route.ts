@@ -4,7 +4,6 @@ import { NextRequest, NextResponse } from 'next/server';
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic'; // TTS should never be statically optimized/cached
 
-// Import Google Cloud TTS
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 const textToSpeech = require('@google-cloud/text-to-speech');
 
@@ -53,7 +52,7 @@ export async function POST(request: NextRequest) {
     }
 
     const totalTime = performance.now() - requestStartTime;
-    console.log(`TTS audio generated successfully in ${totalTime.toFixed(2)}ms)`);
+    console.log(`TTS audio generated successfully in ${totalTime.toFixed(2)}ms`);
 
     // Return the audio content as MP3
     return new NextResponse(response.audioContent, {

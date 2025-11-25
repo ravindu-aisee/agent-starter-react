@@ -12,7 +12,7 @@ import { warmupTTSAPI } from '@/lib/tts-warmup';
 
 interface DataChannelMessage {
   type: 'query' | 'response';
-  bus_number?: string;
+  bus_numbers?: string[];
   request_id?: string;
   timestamp?: number;
   result?: string;
@@ -53,6 +53,7 @@ export function CameraComponent() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const modelRef = useRef<any>(null);
   const detectionIntervalRef = useRef<NodeJS.Timeout | null>(null);
+  const cropCanvasRef = useRef<HTMLCanvasElement | null>(null); // Reusable canvas for cropping
 
   // processing guards
   const processingIdsRef = useRef<Set<number>>(new Set());
@@ -60,7 +61,7 @@ export function CameraComponent() {
   const announcedBusesRef = useRef<Set<string>>(new Set());
   const frameCountRef = useRef(0);
   const matchFoundRef = useRef(false);
-  const targetBusNumberRef = useRef<string>('');
+  const targetBusNumberRef = useRef<string[]>([]);
   const validBusRoutesRef = useRef<string[]>([]);
 
   // Performance tracking
@@ -108,8 +109,9 @@ export function CameraComponent() {
           validBusRoutesRef.current = [];
         }
         console.log(
-          `Opening camera for query: ${data.bus_number} (request_id: ${data.request_id})`
+          `Opening camera for bus numbers: [${data.bus_numbers?.join(', ')}] (request_id: ${data.request_id})`
         );
+        console.log('Bus numbers data type and value:', typeof data.bus_numbers, data.bus_numbers);
 
         setCurrentRequestId(data.request_id);
 
@@ -131,32 +133,63 @@ export function CameraComponent() {
         // Reset OCR processor for new query
         parallelOCRProcessor.reset();
 
-        const normalizedTarget = normalizeBusNumber(data.bus_number);
-        targetBusNumberRef.current = normalizedTarget || '';
-        console.log(`Target bus number: ${data.bus_number} → Normalized: ${normalizedTarget}`);
+        console.log('Raw bus_numbers from backend:', data.bus_numbers);
+        console.log('Is array?', Array.isArray(data.bus_numbers));
 
-        // Set up validation callback (runs in each thread independently)
-        const validationCallback: ValidationCallback = (normalizedText, individualWords) => {
-          return findClosestValidRoute(normalizedText, individualWords);
-        };
-        parallelOCRProcessor.setValidationCallback(validationCallback);
+        const normalizedTargets = (data.bus_numbers || [])
+          .map((bus) => {
+            const normalized = normalizeBusNumber(bus);
+            console.log(`Normalizing: "${bus}" → "${normalized}"`);
+            return normalized;
+          })
+          .filter(Boolean);
+
+        targetBusNumberRef.current = normalizedTargets;
+        console.log(
+          `Target bus numbers: [${data.bus_numbers?.join(', ')}] → Normalized: [${normalizedTargets.join(', ')}]`
+        );
+        console.log('targetBusNumberRef.current set to:', targetBusNumberRef.current);
+
+        // Set requested bus numbers in OCR processor for O(1) lookup
+        parallelOCRProcessor.setRequestedBusNumbers(normalizedTargets);
+
+        // // Set up validation callback (runs in each thread independently)
+        // const validationCallback: ValidationCallback = (normalizedText, individualWords) => {
+        //   return findClosestValidRoute(normalizedText, individualWords);
+        // };
+        // parallelOCRProcessor.setValidationCallback(validationCallback);
 
         // Set up match callback (runs in each thread independently, triggers TTS immediately)
         const matchCallback: MatchCallback = async (validatedBusNumber, objectId, ttsTrigger) => {
+          console.log(
+            `[Match Check] Thread ${objectId}: Checking "${validatedBusNumber}" against targets: [${targetBusNumberRef.current.join(', ')}]`
+          );
+
           const isMatch =
-            !!targetBusNumberRef.current && validatedBusNumber === targetBusNumberRef.current;
+            targetBusNumberRef.current.length > 0 &&
+            targetBusNumberRef.current.includes(validatedBusNumber);
+
+          console.log(`[Match Check] Thread ${objectId}: Result = ${isMatch}`);
 
           if (isMatch) {
             console.log('MATCH FOUND!');
             console.log(
-              `   [Thread ${objectId}] Validated: "${validatedBusNumber}" === Target: "${targetBusNumberRef.current}"`
+              `   [Thread ${objectId}] Validated: "${validatedBusNumber}" matches one of targets: [${targetBusNumberRef.current.join(', ')}]`
             );
 
-            // Set match flag IMMEDIATELY (this stops other threads)
+            // Set match flag IMMEDIATELY (this stops other threads from starting)
             matchFoundRef.current = true;
 
             // Call TTS trigger timing IMMEDIATELY
             await ttsTrigger();
+
+            // CRITICAL: Abort other threads IMMEDIATELY to stop wasting resources
+            // This happens BEFORE TTS to minimize unnecessary OCR processing
+            console.log('[Match] Aborting other threads immediately...');
+            parallelOCRProcessor.abortAll();
+
+            // Stop detection loop immediately
+            stopLoop();
 
             // Show popup and trigger TTS in PARALLEL for minimal latency
             const popupPromise = Promise.resolve(
@@ -166,9 +199,8 @@ export function CameraComponent() {
               })
             );
 
-            // CRITICAL: Wait for TTS to FINISH PLAYING before any cleanup/abort
-            // This ensures audio plays completely before state clearing
-            console.log('Waiting for TTS to finish playing...');
+            // CRITICAL: Wait for TTS to FINISH PLAYING
+            console.log('[Match] Waiting for TTS to finish playing...');
             const ttsPromise = playTTSAnnouncementImmediate(validatedBusNumber).catch((err) => {
               console.error('TTS error:', err);
             });
@@ -176,12 +208,6 @@ export function CameraComponent() {
             // WAIT for TTS to complete before proceeding
             await Promise.all([popupPromise, ttsPromise]);
             console.log('✅ TTS playback completed');
-
-            // Stop detection loop AFTER TTS finishes
-            stopLoop();
-
-            // Abort all other threads AFTER TTS finishes
-            parallelOCRProcessor.abortAll();
 
             // Log final timing statistics
             const stats = parallelOCRProcessor.getStats();
@@ -204,9 +230,25 @@ export function CameraComponent() {
         // Set up abort check callback
         parallelOCRProcessor.setShouldAbortCheck(() => matchFoundRef.current);
 
-        if (data.bus_number) {
-          sendResponse(`Camera started for bus number ${data.bus_number}...`, data.request_id);
+        console.log('Checking bus_numbers for response:', {
+          bus_numbers: data.bus_numbers,
+          isArray: Array.isArray(data.bus_numbers),
+          length: data.bus_numbers?.length,
+          condition:
+            data.bus_numbers && Array.isArray(data.bus_numbers) && data.bus_numbers.length > 0,
+        });
+
+        if (data.bus_numbers && Array.isArray(data.bus_numbers) && data.bus_numbers.length > 0) {
+          let message = '';
+          if (data.bus_numbers.length === 1) {
+            message = `Camera started for bus number ${data.bus_numbers[0]}. `;
+          } else {
+            message = `Camera started for bus numbers ${data.bus_numbers.join(' and ')}. `;
+          }
+          console.log('Sending response:', message);
+          sendResponse(message, data.request_id);
         } else {
+          console.log('Sending default response (bus_numbers was empty or invalid)');
           sendResponse('Camera started successfully', data.request_id);
         }
       }
@@ -238,58 +280,58 @@ export function CameraComponent() {
     return dp[m][n];
   };
 
-  const findClosestValidRoute = useCallback(
-    (ocrTextRaw: string, individualWords?: string[]): string => {
-      const busRoutes = validBusRoutesRef.current;
-      if (!busRoutes || busRoutes.length === 0) {
-        console.warn('No valid bus routes available for validation');
-        return 'None';
-      }
+  // const findClosestValidRoute = useCallback(
+  //   (ocrTextRaw: string, individualWords?: string[]): string => {
+  //     const busRoutes = validBusRoutesRef.current;
+  //     if (!busRoutes || busRoutes.length === 0) {
+  //       console.warn('No valid bus routes available for validation');
+  //       return 'None';
+  //     }
 
-      const ocrText = normalizeBusNumber(ocrTextRaw);
-      if (!ocrText || ocrText === 'NONE') return 'None';
+  //     const ocrText = normalizeBusNumber(ocrTextRaw);
+  //     if (!ocrText || ocrText === 'NONE') return 'None';
 
-      console.log(`Validating OCR result: "${ocrText}" against ${busRoutes.length} routes`);
-      if (individualWords && individualWords.length > 0) {
-        console.log(`Individual words: [${individualWords.map((w) => `"${w}"`).join(', ')}]`);
-      }
+  //     console.log(`Validating OCR result: "${ocrText}" against ${busRoutes.length} routes`);
+  //     if (individualWords && individualWords.length > 0) {
+  //       console.log(`Individual words: [${individualWords.map((w) => `"${w}"`).join(', ')}]`);
+  //     }
 
-      // Level 1: Check full text exact match
-      if (busRoutes.includes(ocrText)) return ocrText;
+  //     // Level 1: Check full text exact match
+  //     if (busRoutes.includes(ocrText)) return ocrText;
 
-      // Level 2: Check individual words for exact matches (most efficient for cases like "123" in mixed text)
-      if (individualWords && individualWords.length > 0) {
-        for (const word of individualWords) {
-          const normalizedWord = normalizeBusNumber(word);
-          if (normalizedWord && busRoutes.includes(normalizedWord)) {
-            console.log(`Found exact match in individual word: "${word}" → "${normalizedWord}"`);
-            return normalizedWord;
-          }
-        }
-      }
+  //     // Level 2: Check individual words for exact matches (most efficient for cases like "123" in mixed text)
+  //     if (individualWords && individualWords.length > 0) {
+  //       for (const word of individualWords) {
+  //         const normalizedWord = normalizeBusNumber(word);
+  //         if (normalizedWord && busRoutes.includes(normalizedWord)) {
+  //           console.log(`Found exact match in individual word: "${word}" → "${normalizedWord}"`);
+  //           return normalizedWord;
+  //         }
+  //       }
+  //     }
 
-      // Level 3: Check if full text contains a valid route
-      for (const r of busRoutes)
-        if (ocrText.includes(r) && r.length >= ocrText.length * 0.5) return r;
+  //     // Level 3: Check if full text contains a valid route
+  //     for (const r of busRoutes)
+  //       if (ocrText.includes(r) && r.length >= ocrText.length * 0.5) return r;
 
-      // Level 4: Check if valid route contains the OCR text
-      for (const r of busRoutes)
-        if (r.includes(ocrText) && ocrText.length >= r.length * 0.6) return r;
+  //     // Level 4: Check if valid route contains the OCR text
+  //     for (const r of busRoutes)
+  //       if (r.includes(ocrText) && ocrText.length >= r.length * 0.6) return r;
 
-      // Level 5: Fuzzy match with Levenshtein distance
-      let best = 'None',
-        bestD = Infinity;
-      for (const r of busRoutes) {
-        const d = levenshteinDistance(ocrText, r);
-        if (d <= 1 && Math.abs(ocrText.length - r.length) <= 1 && d < bestD) {
-          best = r;
-          bestD = d;
-        }
-      }
-      return best !== 'None' ? best : 'None';
-    },
-    [normalizeBusNumber]
-  );
+  //     // Level 5: Fuzzy match with Levenshtein distance
+  //     let best = 'None',
+  //       bestD = Infinity;
+  //     for (const r of busRoutes) {
+  //       const d = levenshteinDistance(ocrText, r);
+  //       if (d <= 1 && Math.abs(ocrText.length - r.length) <= 1 && d < bestD) {
+  //         best = r;
+  //         bestD = d;
+  //       }
+  //     }
+  //     return best !== 'None' ? best : 'None';
+  //   },
+  //   [normalizeBusNumber]
+  // );
 
   // ---------------------------------- model init -----------------------------------------
   useEffect(() => {
@@ -398,7 +440,7 @@ export function CameraComponent() {
     processedObjectsRef.current.clear();
     announcedBusesRef.current.clear();
     matchFoundRef.current = false;
-    targetBusNumberRef.current = '';
+    targetBusNumberRef.current = [];
     validBusRoutesRef.current = [];
     frameTimesRef.current = [];
     performanceScores.current = [];
@@ -638,7 +680,11 @@ export function CameraComponent() {
     const vw = Math.min(video.videoWidth - vx, w + 2 * w * pad);
     const vh = Math.min(video.videoHeight - vy, h + 2 * h * pad);
 
-    const c = document.createElement('canvas');
+    // Reuse canvas instead of creating new one for each crop (reduces GC pressure)
+    if (!cropCanvasRef.current) {
+      cropCanvasRef.current = document.createElement('canvas');
+    }
+    const c = cropCanvasRef.current;
     c.width = vw;
     c.height = vh;
     const g = c.getContext('2d');
@@ -855,7 +901,7 @@ export function CameraComponent() {
           return;
         }
 
-        if (det.confidence < 0.2) {
+        if (det.confidence < 0.25) {
           console.log(
             `[Det ${detectionIndex}] Skipping low confidence: ${(det.confidence * 100).toFixed(1)}%`
           );
@@ -905,8 +951,13 @@ export function CameraComponent() {
           // Mark as processed
           processedObjectsRef.current.set(objectId, Date.now());
 
-          // Update UI with detection if successful and not aborted
-          if (result.success && !result.wasAborted && result.text !== 'None') {
+          // Update UI with detection if successful and not aborted and no match found yet
+          if (
+            result.success &&
+            !result.wasAborted &&
+            result.text !== 'None' &&
+            !matchFoundRef.current
+          ) {
             setDetectedBuses((prev) => new Map(prev).set(objectId, result.text));
             setOcrResults((prev) => [result.text, ...prev].slice(0, 5));
           }
@@ -938,8 +989,8 @@ export function CameraComponent() {
     generateObjectId,
     sendResponse,
     stopLoop,
-    normalizeBusNumber,
-    findClosestValidRoute,
+    // normalizeBusNumber,
+    // findClosestValidRoute,
     frameRate,
     ALLOWED,
     CLASS_NAMES,
@@ -1069,21 +1120,23 @@ export function CameraComponent() {
       >
         <strong>Model:</strong> {modelLoaded ? 'Loaded Successfully' : 'Loading…'}
         <br />
-        <strong>Detection:</strong>{' '}
+        <strong>Number plate Detection:</strong>{' '}
         {plateDetections.length ? ` ${plateDetections.length} plate(s)` : 'Scanning…'}
         <br />
-        <strong>Detected Buses:</strong>{' '}
+        <strong>OCR Detections:</strong>{' '}
         {detectedBuses.size ? Array.from(detectedBuses.values()).join(', ') : 'None yet'}
-        {lastQuery?.bus_number && (
-          <>
-            <br />
-            <strong>Target Bus:</strong> {lastQuery.bus_number} (Normalized:{' '}
-            {normalizeBusNumber(lastQuery.bus_number)})
-          </>
-        )}
+        <br />
+        {lastQuery?.bus_numbers &&
+          Array.isArray(lastQuery.bus_numbers) &&
+          lastQuery.bus_numbers.length > 0 && (
+            <>
+              <strong>Target Bus Numbers:</strong> [
+              {lastQuery.bus_numbers.map((b) => normalizeBusNumber(b)).join(', ')}]
+            </>
+          )}
       </div>
 
-      {ocrResults.length > 0 && (
+      {/* {ocrResults.length > 0 && (
         <div
           style={{
             marginTop: 8,
@@ -1104,7 +1157,7 @@ export function CameraComponent() {
             </div>
           ))}
         </div>
-      )}
+      )} */}
 
       <button
         onClick={() => {
