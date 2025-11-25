@@ -153,12 +153,6 @@ export function CameraComponent() {
         // Set requested bus numbers in OCR processor for O(1) lookup
         parallelOCRProcessor.setRequestedBusNumbers(normalizedTargets);
 
-        // // Set up validation callback (runs in each thread independently)
-        // const validationCallback: ValidationCallback = (normalizedText, individualWords) => {
-        //   return findClosestValidRoute(normalizedText, individualWords);
-        // };
-        // parallelOCRProcessor.setValidationCallback(validationCallback);
-
         // Set up match callback (runs in each thread independently, triggers TTS immediately)
         const matchCallback: MatchCallback = async (validatedBusNumber, objectId, ttsTrigger) => {
           console.log(
@@ -262,76 +256,6 @@ export function CameraComponent() {
     if (!busNumber) return '';
     return busNumber.replace(/[^a-zA-Z0-9]/g, '').toUpperCase();
   }, []);
-
-  const levenshteinDistance = (a: string, b: string): number => {
-    const m = a.length,
-      n = b.length;
-    const dp = Array.from({ length: m + 1 }, (_, i) => new Array(n + 1).fill(0));
-    for (let i = 0; i <= m; i++) dp[i][0] = i;
-    for (let j = 0; j <= n; j++) dp[0][j] = j;
-    for (let i = 1; i <= m; i++) {
-      for (let j = 1; j <= n; j++) {
-        dp[i][j] =
-          a[i - 1] === b[j - 1]
-            ? dp[i - 1][j - 1]
-            : Math.min(dp[i - 1][j - 1] + 1, dp[i][j - 1] + 1, dp[i - 1][j] + 1);
-      }
-    }
-    return dp[m][n];
-  };
-
-  // const findClosestValidRoute = useCallback(
-  //   (ocrTextRaw: string, individualWords?: string[]): string => {
-  //     const busRoutes = validBusRoutesRef.current;
-  //     if (!busRoutes || busRoutes.length === 0) {
-  //       console.warn('No valid bus routes available for validation');
-  //       return 'None';
-  //     }
-
-  //     const ocrText = normalizeBusNumber(ocrTextRaw);
-  //     if (!ocrText || ocrText === 'NONE') return 'None';
-
-  //     console.log(`Validating OCR result: "${ocrText}" against ${busRoutes.length} routes`);
-  //     if (individualWords && individualWords.length > 0) {
-  //       console.log(`Individual words: [${individualWords.map((w) => `"${w}"`).join(', ')}]`);
-  //     }
-
-  //     // Level 1: Check full text exact match
-  //     if (busRoutes.includes(ocrText)) return ocrText;
-
-  //     // Level 2: Check individual words for exact matches (most efficient for cases like "123" in mixed text)
-  //     if (individualWords && individualWords.length > 0) {
-  //       for (const word of individualWords) {
-  //         const normalizedWord = normalizeBusNumber(word);
-  //         if (normalizedWord && busRoutes.includes(normalizedWord)) {
-  //           console.log(`Found exact match in individual word: "${word}" → "${normalizedWord}"`);
-  //           return normalizedWord;
-  //         }
-  //       }
-  //     }
-
-  //     // Level 3: Check if full text contains a valid route
-  //     for (const r of busRoutes)
-  //       if (ocrText.includes(r) && r.length >= ocrText.length * 0.5) return r;
-
-  //     // Level 4: Check if valid route contains the OCR text
-  //     for (const r of busRoutes)
-  //       if (r.includes(ocrText) && ocrText.length >= r.length * 0.6) return r;
-
-  //     // Level 5: Fuzzy match with Levenshtein distance
-  //     let best = 'None',
-  //       bestD = Infinity;
-  //     for (const r of busRoutes) {
-  //       const d = levenshteinDistance(ocrText, r);
-  //       if (d <= 1 && Math.abs(ocrText.length - r.length) <= 1 && d < bestD) {
-  //         best = r;
-  //         bestD = d;
-  //       }
-  //     }
-  //     return best !== 'None' ? best : 'None';
-  //   },
-  //   [normalizeBusNumber]
-  // );
 
   // ---------------------------------- model init -----------------------------------------
   useEffect(() => {
@@ -690,27 +614,9 @@ export function CameraComponent() {
     const g = c.getContext('2d');
     if (!g) return '';
     g.drawImage(video, vx, vy, vw, vh, 0, 0, vw, vh);
-    // Reduced quality from 0.95 to 0.75 for smaller payload and faster network transfer
+
     return c.toDataURL('image/jpeg', 0.75);
   };
-
-  // async function saveImageAsync(imageDataUrl: string, filename: string): Promise<void> {
-  //   try {
-  //     const response = await fetch('/api/save-image', {
-  //       method: 'POST',
-  //       headers: { 'Content-Type': 'application/json' },
-  //       body: JSON.stringify({ image: imageDataUrl, filename }),
-  //     });
-  //     if (response.ok) {
-  //       const result = await response.json();
-  //       console.log(`Image saved: ${result.path}`);
-  //     } else {
-  //       console.error('Save image error:', response.statusText);
-  //     }
-  //   } catch (error) {
-  //     console.error('Save image network error:', error);
-  //   }
-  // }
 
   function drawBoxes(dets: Detection[], w: number, h: number) {
     const canvas = canvasRef.current;
@@ -974,7 +880,6 @@ export function CameraComponent() {
       });
 
       // Fire all pipelines in parallel - DO NOT WAITt
-      // This ensures all detections start processing simultaneously
       // First one to match will trigger TTS and abort the rest
       Promise.allSettled(parallelPipelines).catch((err) => {
         console.error('❌ Parallel pipeline error:', err);
@@ -989,8 +894,6 @@ export function CameraComponent() {
     generateObjectId,
     sendResponse,
     stopLoop,
-    // normalizeBusNumber,
-    // findClosestValidRoute,
     frameRate,
     ALLOWED,
     CLASS_NAMES,
@@ -1135,29 +1038,6 @@ export function CameraComponent() {
             </>
           )}
       </div>
-
-      {/* {ocrResults.length > 0 && (
-        <div
-          style={{
-            marginTop: 8,
-            padding: 10,
-            background: 'rgba(0,255,0,0.15)',
-            borderRadius: 8,
-            fontSize: '.8rem',
-            maxWidth: 600,
-            width: '90%',
-            maxHeight: 100,
-            overflowY: 'auto',
-          }}
-        >
-          <strong>Recent Detections:</strong>
-          {ocrResults.map((t, i) => (
-            <div key={i} style={{ marginTop: 4 }}>
-              {i + 1}. {t}
-            </div>
-          ))}
-        </div>
-      )} */}
 
       <button
         onClick={() => {
