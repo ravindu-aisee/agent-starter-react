@@ -4,11 +4,13 @@ import React, { useCallback, useEffect, useRef, useState } from 'react';
 import Webcam from 'react-webcam';
 import { useDataChannel } from '@livekit/components-react';
 import { toastAlert } from '@/components/livekit/alert-toast';
-import { warmupOCRAPI } from '@/lib/ocr-warmup';
 import { MatchCallback, ValidationCallback, parallelOCRProcessor } from '@/lib/parallel-ocr';
 import { METRICS, performanceMonitor } from '@/lib/performance-monitor';
+import { audioService } from '@/lib/services/audio-service';
+import { modelService } from '@/lib/services/model-service';
+import { ocrService } from '@/lib/services/ocr-service';
+import { ttsService } from '@/lib/services/tts-service';
 import { Detection, literTModelManager } from '@/lib/tflite-loader';
-import { warmupTTSAPI } from '@/lib/tts-warmup';
 
 interface DataChannelMessage {
   type: 'query' | 'response';
@@ -34,7 +36,7 @@ export function CameraComponent() {
   const [currentRequestId, setCurrentRequestId] = useState<string>('');
   const [validBusRoutes, setValidBusRoutes] = useState<string[] | null>(null);
   const [modelLoaded, setModelLoaded] = useState(false);
-  const [modelStatus, setModelStatus] = useState('Not initialized');
+  const [modelStatus, setModelStatus] = useState('Initializing...');
   const [plateDetections, setPlateDetections] = useState<Detection[]>([]);
   const [ocrResults, setOcrResults] = useState<string[]>([]);
   const [detectedBuses, setDetectedBuses] = useState<Map<number, string>>(new Map());
@@ -45,13 +47,10 @@ export function CameraComponent() {
   // ---- Audio unlock state ----
   const [audioReady, setAudioReady] = useState(false);
   const [audioHint, setAudioHint] = useState<string>('');
-  const audioCtxRef = useRef<AudioContext | any | null>(null);
-  const primedAudioRef = useRef<HTMLAudioElement | null>(null);
 
   // ---- refs / infra ----
   const webcamRef = useRef<Webcam>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
-  const modelRef = useRef<any>(null);
   const detectionIntervalRef = useRef<NodeJS.Timeout | null>(null);
   const cropCanvasRef = useRef<HTMLCanvasElement | null>(null); // Reusable canvas for cropping
 
@@ -257,42 +256,45 @@ export function CameraComponent() {
     return busNumber.replace(/[^a-zA-Z0-9]/g, '').toUpperCase();
   }, []);
 
-  // ---------------------------------- model init -----------------------------------------
+  // ---------------------------------- Initialize services on component mount -----------------------------------------
+  // This runs ONCE when the component mounts (browser startup)
+  // Independent of camera state - ready before user needs them
   useEffect(() => {
-    if (showCamera && !modelLoaded && !modelRef.current) {
-      (async () => {
-        try {
-          setModelStatus('Initializing LiteRT…');
-          await literTModelManager.initialize();
+    let mounted = true;
 
-          setModelStatus('Loading model…');
-          modelRef.current = await literTModelManager.loadModel('/models/yolo_trained.tflite');
+    (async () => {
+      try {
+        setModelStatus('Initializing services...');
 
+        // Initialize all services in parallel for fastest startup
+        await Promise.all([
+          modelService.initialize('/models/yolo_trained.tflite'),
+          ocrService.warmup(),
+          ttsService.warmup(),
+        ]);
+
+        if (mounted) {
           setModelLoaded(true);
-          setModelStatus('Model ready - detecting bus number plates');
-          console.log('LiteRT model loaded successfully!');
-
-          // Warm up OCR and TTS APIs in parallel to avoid cold start on first detection
-          Promise.all([
-            warmupOCRAPI().catch((err) => {
-              console.warn('OCR warmup failed (non-critical):', err);
-            }),
-            warmupTTSAPI().catch((err) => {
-              console.warn('TTS warmup failed (non-critical):', err);
-            }),
-          ]);
-        } catch (e: any) {
-          const errorMsg = `Init error: ${e?.message ?? e}`;
-          setModelStatus(errorMsg);
-          console.error('Model loading error:', errorMsg, e);
+          setModelStatus('Ready - services initialized');
+          console.log('[CameraComponent] ✅ All services initialized successfully');
         }
-      })();
-    }
-  }, [showCamera, modelLoaded]);
+      } catch (e: any) {
+        const errorMsg = `Service initialization error: ${e?.message ?? e}`;
+        if (mounted) {
+          setModelStatus(errorMsg);
+        }
+        console.error('[CameraComponent] Service initialization error:', errorMsg, e);
+      }
+    })();
+
+    return () => {
+      mounted = false;
+    };
+  }, []); // Run once on mount
 
   // ----------------------------------- detection loop lifecycle -----------------------------------
   useEffect(() => {
-    if (showCamera && modelLoaded && modelRef.current) {
+    if (showCamera && modelLoaded && modelService.isReady()) {
       console.log('Starting detection loop…');
       startLoop();
       return () => {
@@ -353,6 +355,10 @@ export function CameraComponent() {
     parallelOCRProcessor.setMatchCallback(null);
     parallelOCRProcessor.setShouldAbortCheck(null);
 
+    // Reset service states
+    ttsService.resetAnnouncements();
+    audioService.reset();
+
     setPlateDetections([]);
     setOcrResults([]);
     setDetectedBuses(new Map());
@@ -376,208 +382,52 @@ export function CameraComponent() {
 
   const unlockAudio = useCallback(async () => {
     try {
-      // Prime an Audio element for iOS - CRITICAL for iOS Safari
-      if (!primedAudioRef.current) {
-        const audio = new Audio();
-        audio.preload = 'none';
-        (audio as HTMLAudioElement & { playsInline?: boolean }).playsInline = true;
-        audio.muted = false;
-
-        // Load a silent data URL to "prime" the audio element
-        audio.src =
-          'data:audio/mp3;base64,SUQzBAAAAAAAI1RTU0UAAAAPAAADTGF2ZjU4Ljc2LjEwMAAAAAAAAAAAAAAA//tQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWGluZwAAAA8AAAACAAADhAC7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7//////////////////////////////////////////////////////////////////8AAAAATGF2YzU4LjEzAAAAAAAAAAAAAAAAJAAAAAAAAAAAA4T0LnrfAAAAAAAAAAAAAAAAAAAAAP/7UGQAD/AAAGkAAAAIAAANIAAAAQAAAaQAAAAgAAA0gAAABExBTUUzLjEwMFVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVQ==';
-
-        // Play silence to unlock - this MUST happen during user gesture
-        try {
-          await audio.play();
-          audio.pause();
-          audio.currentTime = 0;
-        } catch (e) {
-          console.warn('[Audio] Play/pause during unlock failed:', e);
-        }
-
-        primedAudioRef.current = audio;
-        console.log('[Audio] Primed audio element for iOS');
-      }
-
-      const Ctx =
-        (
-          window as Window & {
-            AudioContext?: unknown;
-            webkitAudioContext?: unknown;
-            webkitaudioContext?: unknown;
-          }
-        ).AudioContext ||
-        (
-          window as Window & {
-            AudioContext?: unknown;
-            webkitAudioContext?: unknown;
-            webkitaudioContext?: unknown;
-          }
-        ).webkitAudioContext ||
-        (
-          window as Window & {
-            AudioContext?: unknown;
-            webkitAudioContext?: unknown;
-            webkitaudioContext?: unknown;
-          }
-        ).webkitaudioContext;
-
-      if (Ctx) {
-        if (!audioCtxRef.current) {
-          audioCtxRef.current = new (Ctx as typeof AudioContext)();
-        }
-        const ctx = audioCtxRef.current as AudioContext;
-
-        await ctx.resume();
-        const buf = ctx.createBuffer(1, 1, ctx.sampleRate);
-        const src = ctx.createBufferSource();
-        src.buffer = buf;
-        src.connect(ctx.destination);
-        src.start(0);
-        console.log('[Audio] WebAudio context unlocked');
-      }
-
-      setAudioReady(true);
-      setAudioHint('');
-      console.log('[Audio] Unlocked successfully');
+      await audioService.unlock();
+      setAudioReady(audioService.isReady());
+      setAudioHint(audioService.getHintMessage());
     } catch (e) {
-      console.warn('[Audio] Unlock failed:', e);
+      console.warn('[CameraComponent] Audio unlock error:', e);
       setAudioReady(true);
-      setAudioHint("Tap again if you still can't hear audio.");
+      setAudioHint(audioService.getHintMessage());
     }
   }, []);
 
   // Immediate TTS without popup (popup shown separately in parallel)
   const playTTSAnnouncementImmediate = async (busNumber: string): Promise<void> => {
-    if (announcedBusesRef.current.has(busNumber)) {
+    if (ttsService.hasAnnounced(busNumber)) {
       console.log(`Skipping TTS for ${busNumber} - already announced`);
       return;
     }
+
     try {
       const text = `Bus ${busNumber} has arrived.`;
-      announcedBusesRef.current.add(busNumber);
-
       const ttsStartTime = performance.now();
+
       console.log(`[TTS] Starting TTS generation for "${text}"...`);
 
-      const response = await fetch('/api/tts', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ text }),
-      });
-
-      if (!response.ok) {
-        console.error(`TTS API error: ${response.statusText}`);
-        announcedBusesRef.current.delete(busNumber);
-        return;
-      }
-
-      const ttsGenerationTime = performance.now() - ttsStartTime;
-      console.log(`[TTS] Audio generated in ${ttsGenerationTime.toFixed(2)}ms`);
-
-      const audioBlob = await response.blob();
-      const blobTime = performance.now() - ttsStartTime;
-      console.log(`[TTS] Audio blob ready in ${blobTime.toFixed(2)}ms (${audioBlob.size} bytes)`);
+      // Generate audio using TTS service
+      const audioBlob = await ttsService.generateAudio(text);
 
       try {
-        const hasWebAudio =
-          typeof window !== 'undefined' &&
-          !!(
-            (
-              window as Window & {
-                AudioContext?: unknown;
-                webkitAudioContext?: unknown;
-                webkitaudioContext?: unknown;
-              }
-            ).AudioContext ||
-            (
-              window as Window & {
-                AudioContext?: unknown;
-                webkitAudioContext?: unknown;
-                webkitaudioContext?: unknown;
-              }
-            ).webkitAudioContext ||
-            (
-              window as Window & {
-                AudioContext?: unknown;
-                webkitAudioContext?: unknown;
-                webkitaudioContext?: unknown;
-              }
-            ).webkitaudioContext
-          );
+        // Play audio using audio service
+        console.log(`[TTS] Starting playback...`);
+        await audioService.playAudio(audioBlob);
 
-        // Prefer WebAudio when unlocked (best on iOS)
-        if (audioReady && hasWebAudio && audioCtxRef.current) {
-          const ctx = audioCtxRef.current as AudioContext;
+        const totalTime = performance.now() - ttsStartTime;
+        console.log(`[TTS] ✅ Playback completed (total time: ${totalTime.toFixed(2)}ms)`);
 
-          await ctx.resume();
-          const arrayBuf = await audioBlob.arrayBuffer();
-          const audioBuf = await new Promise<AudioBuffer>((resolve, reject) => {
-            ctx.decodeAudioData(arrayBuf, resolve, reject);
-          });
-
-          const src = ctx.createBufferSource();
-          src.buffer = audioBuf;
-          src.connect(ctx.destination);
-
-          const totalTime = performance.now() - ttsStartTime;
-          console.log(`[TTS] Starting playback (total time: ${totalTime.toFixed(2)}ms)`);
-          src.start(0);
-
-          src.onended = () => {
-            console.log('TTS playback finished (WebAudio)');
-            setShowCamera(false);
-            setTimeout(() => clearAllStates(), 300);
-          };
-        } else {
-          // Use primed audio element for iOS - CRITICAL for iOS Safari
-          const audio = primedAudioRef.current || new Audio();
-
-          // Configure for iOS
-          (audio as HTMLAudioElement & { playsInline?: boolean }).playsInline = true;
-          audio.muted = false;
-          audio.preload = 'auto';
-
-          // Create object URL and set as source
-          const audioUrl = URL.createObjectURL(audioBlob);
-          audio.src = audioUrl;
-
-          // Load the audio
-          await audio.load();
-
-          const totalTime = performance.now() - ttsStartTime;
-          console.log(`[TTS] Starting playback (total time: ${totalTime.toFixed(2)}ms)`);
-
-          // Play - this should work because the audio element was primed during user gesture
-          await audio.play();
-
-          audio.onended = () => {
-            URL.revokeObjectURL(audioUrl);
-            console.log('TTS playback finished (HTMLAudio)');
-            setShowCamera(false);
-            setTimeout(() => clearAllStates(), 300);
-          };
-
-          audio.onerror = (e) => {
-            console.error('Audio playback error:', e);
-            URL.revokeObjectURL(audioUrl);
-            announcedBusesRef.current.delete(busNumber);
-          };
-        }
+        // Close camera after TTS finishes
+        setShowCamera(false);
+        setTimeout(() => clearAllStates(), 300);
       } catch (err: unknown) {
         console.error('Error playing TTS:', err);
         const errorName = err instanceof Error ? err.name : String(err);
         if (errorName.includes('NotAllowedError')) {
-          setAudioHint(
-            'Tap "Enable sound" to allow audio, then I\'ll speak automatically next time.'
-          );
+          setAudioHint(audioService.getHintMessage());
         }
-        announcedBusesRef.current.delete(busNumber);
       }
     } catch (error) {
-      console.error('TTS error:', error);
-      announcedBusesRef.current.delete(busNumber);
+      console.error('TTS generation error:', error);
     }
   };
 
@@ -685,8 +535,8 @@ export function CameraComponent() {
   // ------------------------------ Main detection pipeline with TRUE parallelism ---------------------------------
   const runDetection = useCallback(async () => {
     const video = webcamRef.current?.video as HTMLVideoElement | undefined;
-    const model = modelRef.current;
-    if (!video || !model || video.readyState !== 4) return;
+
+    if (!video || video.readyState !== 4 || !modelService.isReady()) return;
 
     // Early exit if match already found
     if (matchFoundRef.current) return;
@@ -729,7 +579,7 @@ export function CameraComponent() {
       );
 
       const infId = performanceMonitor.start(METRICS.INFERENCE);
-      const raw = await literTModelManager.runInference(model, inputTensor);
+      const raw = await literTModelManager.runInference(modelService.getModel(), inputTensor);
       performanceMonitor.end(infId);
 
       const postId = performanceMonitor.start(METRICS.POSTPROCESSING);
@@ -932,7 +782,7 @@ export function CameraComponent() {
             border: '2px solid #fa0',
           }}
         >
-          <div>{modelStatus}</div>
+          {/* <div>{modelStatus}</div> */}
           <div style={{ fontSize: '.9rem', marginTop: 10, opacity: 0.8 }}>
             Loading...Please wait!
           </div>
