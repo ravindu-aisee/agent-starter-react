@@ -4,14 +4,17 @@ import React, { useCallback, useEffect, useRef, useState } from 'react';
 import Webcam from 'react-webcam';
 import { useDataChannel } from '@livekit/components-react';
 import { toastAlert } from '@/components/livekit/alert-toast';
-import { warmupOCRAPI } from '@/lib/ocr-warmup';
-import { parallelOCRProcessor } from '@/lib/parallel-ocr';
+import { MatchCallback, ValidationCallback, parallelOCRProcessor } from '@/lib/parallel-ocr';
 import { METRICS, performanceMonitor } from '@/lib/performance-monitor';
+import { audioService } from '@/lib/services/audio-service';
+import { modelService } from '@/lib/services/model-service';
+import { ocrService } from '@/lib/services/ocr-service';
+import { ttsService } from '@/lib/services/tts-service';
 import { Detection, literTModelManager } from '@/lib/tflite-loader';
 
 interface DataChannelMessage {
   type: 'query' | 'response';
-  bus_number?: string;
+  bus_numbers?: string[];
   request_id?: string;
   timestamp?: number;
   result?: string;
@@ -33,7 +36,7 @@ export function CameraComponent() {
   const [currentRequestId, setCurrentRequestId] = useState<string>('');
   const [validBusRoutes, setValidBusRoutes] = useState<string[] | null>(null);
   const [modelLoaded, setModelLoaded] = useState(false);
-  const [modelStatus, setModelStatus] = useState('Not initialized');
+  const [modelStatus, setModelStatus] = useState('Initializing...');
   const [plateDetections, setPlateDetections] = useState<Detection[]>([]);
   const [ocrResults, setOcrResults] = useState<string[]>([]);
   const [detectedBuses, setDetectedBuses] = useState<Map<number, string>>(new Map());
@@ -44,14 +47,12 @@ export function CameraComponent() {
   // ---- Audio unlock state ----
   const [audioReady, setAudioReady] = useState(false);
   const [audioHint, setAudioHint] = useState<string>('');
-  const audioCtxRef = useRef<AudioContext | any | null>(null);
-  const primedAudioRef = useRef<HTMLAudioElement | null>(null);
 
   // ---- refs / infra ----
   const webcamRef = useRef<Webcam>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
-  const modelRef = useRef<any>(null);
   const detectionIntervalRef = useRef<NodeJS.Timeout | null>(null);
+  const cropCanvasRef = useRef<HTMLCanvasElement | null>(null); // Reusable canvas for cropping
 
   // processing guards
   const processingIdsRef = useRef<Set<number>>(new Set());
@@ -59,7 +60,7 @@ export function CameraComponent() {
   const announcedBusesRef = useRef<Set<string>>(new Set());
   const frameCountRef = useRef(0);
   const matchFoundRef = useRef(false);
-  const targetBusNumberRef = useRef<string>('');
+  const targetBusNumberRef = useRef<string[]>([]);
   const validBusRoutesRef = useRef<string[]>([]);
 
   // Performance tracking
@@ -107,8 +108,9 @@ export function CameraComponent() {
           validBusRoutesRef.current = [];
         }
         console.log(
-          `Opening camera for query: ${data.bus_number} (request_id: ${data.request_id})`
+          `Opening camera for bus numbers: [${data.bus_numbers?.join(', ')}] (request_id: ${data.request_id})`
         );
+        console.log('Bus numbers data type and value:', typeof data.bus_numbers, data.bus_numbers);
 
         setCurrentRequestId(data.request_id);
 
@@ -130,39 +132,116 @@ export function CameraComponent() {
         // Reset OCR processor for new query
         parallelOCRProcessor.reset();
 
-        const normalizedTarget = normalizeBusNumber(data.bus_number);
-        targetBusNumberRef.current = normalizedTarget || '';
-        console.log(`Target bus number: ${data.bus_number} → Normalized: ${normalizedTarget}`);
+        console.log('Raw bus_numbers from backend:', data.bus_numbers);
+        console.log('Is array?', Array.isArray(data.bus_numbers));
 
-        // Set up match callback for immediate detection
-        parallelOCRProcessor.setMatchCallback((normalizedText, rawText, individualWords) => {
-          const validated = findClosestValidRoute(normalizedText, individualWords);
-          const isMatch = !!targetBusNumberRef.current && validated === targetBusNumberRef.current;
+        const normalizedTargets = (data.bus_numbers || [])
+          .map((bus) => {
+            const normalized = normalizeBusNumber(bus);
+            console.log(`Normalizing: "${bus}" → "${normalized}"`);
+            return normalized;
+          })
+          .filter(Boolean);
+
+        targetBusNumberRef.current = normalizedTargets;
+        console.log(
+          `Target bus numbers: [${data.bus_numbers?.join(', ')}] → Normalized: [${normalizedTargets.join(', ')}]`
+        );
+        console.log('targetBusNumberRef.current set to:', targetBusNumberRef.current);
+
+        // Set requested bus numbers in OCR processor for O(1) lookup
+        parallelOCRProcessor.setRequestedBusNumbers(normalizedTargets);
+
+        // Set up match callback (runs in each thread independently, triggers TTS immediately)
+        const matchCallback: MatchCallback = async (validatedBusNumber, objectId, ttsTrigger) => {
+          console.log(
+            `[Match Check] Thread ${objectId}: Checking "${validatedBusNumber}" against targets: [${targetBusNumberRef.current.join(', ')}]`
+          );
+
+          const isMatch =
+            targetBusNumberRef.current.length > 0 &&
+            targetBusNumberRef.current.includes(validatedBusNumber);
+
+          console.log(`[Match Check] Thread ${objectId}: Result = ${isMatch}`);
 
           if (isMatch) {
-            console.log('IMMEDIATE MATCH DETECTED');
-            console.log(`OCR: "${validated}" === TARGET: "${targetBusNumberRef.current}"`);
+            console.log('MATCH FOUND!');
+            console.log(
+              `   [Thread ${objectId}] Validated: "${validatedBusNumber}" matches one of targets: [${targetBusNumberRef.current.join(', ')}]`
+            );
 
-            // Set match flag immediately
+            // Set match flag IMMEDIATELY (this stops other threads from starting)
             matchFoundRef.current = true;
+
+            // Call TTS trigger timing IMMEDIATELY
+            await ttsTrigger();
+
+            // CRITICAL: Abort other threads IMMEDIATELY to stop wasting resources
+            // This happens BEFORE TTS to minimize unnecessary OCR processing
+            console.log('[Match] Aborting other threads immediately...');
+            parallelOCRProcessor.abortAll();
 
             // Stop detection loop immediately
             stopLoop();
 
-            // Trigger TTS immediately (don't wait)
-            playTTSAnnouncement(validated).catch((err) => {
+            // Show popup and trigger TTS in PARALLEL for minimal latency
+            const popupPromise = Promise.resolve(
+              toastAlert({
+                title: 'Bus Arrived!',
+                description: `Bus ${validatedBusNumber} has arrived.`,
+              })
+            );
+
+            // CRITICAL: Wait for TTS to FINISH PLAYING
+            console.log('[Match] Waiting for TTS to finish playing...');
+            const ttsPromise = playTTSAnnouncementImmediate(validatedBusNumber).catch((err) => {
               console.error('TTS error:', err);
             });
 
-            return true; // Signal match found
-          }
+            // WAIT for TTS to complete before proceeding
+            await Promise.all([popupPromise, ttsPromise]);
+            console.log('✅ TTS playback completed');
 
-          return false;
+            // Log final timing statistics
+            const stats = parallelOCRProcessor.getStats();
+            console.log('FINAL TIMING STATISTICS:');
+            console.log(
+              `   Total threads: ${stats.totalThreads} (${stats.completedThreads} completed, ${stats.abortedThreads} aborted)`
+            );
+            console.log(`   Avg OCR time: ${(stats.avgOCRTime || 0).toFixed(2)}ms`);
+            console.log(`   Avg validation time: ${(stats.avgValidationTime || 0).toFixed(2)}ms`);
+            console.log(`   Avg total pipeline: ${(stats.avgTotalTime || 0).toFixed(2)}ms`);
+            if ((stats.avgQueueWaitTime || 0) > 0) {
+              console.log(`   Avg queue wait: ${(stats.avgQueueWaitTime || 0).toFixed(2)}ms`);
+            }
+
+            console.log(`   [Thread ${objectId}] TTS triggered, all other threads aborted`);
+          }
+        };
+        parallelOCRProcessor.setMatchCallback(matchCallback);
+
+        // Set up abort check callback
+        parallelOCRProcessor.setShouldAbortCheck(() => matchFoundRef.current);
+
+        console.log('Checking bus_numbers for response:', {
+          bus_numbers: data.bus_numbers,
+          isArray: Array.isArray(data.bus_numbers),
+          length: data.bus_numbers?.length,
+          condition:
+            data.bus_numbers && Array.isArray(data.bus_numbers) && data.bus_numbers.length > 0,
         });
 
-        if (data.bus_number) {
-          sendResponse(`Camera started for bus number ${data.bus_number}...`, data.request_id);
+        if (data.bus_numbers && Array.isArray(data.bus_numbers) && data.bus_numbers.length > 0) {
+          let message = '';
+          if (data.bus_numbers.length === 1) {
+            message = `Camera started for bus number ${data.bus_numbers[0]}. `;
+          } else {
+            message = `Camera started for bus numbers ${data.bus_numbers.join(' and ')}. `;
+          }
+          console.log('Sending response:', message);
+          sendResponse(message, data.request_id);
         } else {
+          console.log('Sending default response (bus_numbers was empty or invalid)');
           sendResponse('Camera started successfully', data.request_id);
         }
       }
@@ -177,107 +256,45 @@ export function CameraComponent() {
     return busNumber.replace(/[^a-zA-Z0-9]/g, '').toUpperCase();
   }, []);
 
-  const levenshteinDistance = (a: string, b: string): number => {
-    const m = a.length,
-      n = b.length;
-    const dp = Array.from({ length: m + 1 }, (_, i) => new Array(n + 1).fill(0));
-    for (let i = 0; i <= m; i++) dp[i][0] = i;
-    for (let j = 0; j <= n; j++) dp[0][j] = j;
-    for (let i = 1; i <= m; i++) {
-      for (let j = 1; j <= n; j++) {
-        dp[i][j] =
-          a[i - 1] === b[j - 1]
-            ? dp[i - 1][j - 1]
-            : Math.min(dp[i - 1][j - 1] + 1, dp[i][j - 1] + 1, dp[i - 1][j] + 1);
-      }
-    }
-    return dp[m][n];
-  };
-
-  const findClosestValidRoute = useCallback(
-    (ocrTextRaw: string, individualWords?: string[]): string => {
-      const busRoutes = validBusRoutesRef.current;
-      if (!busRoutes || busRoutes.length === 0) {
-        console.warn('No valid bus routes available for validation');
-        return 'None';
-      }
-
-      const ocrText = normalizeBusNumber(ocrTextRaw);
-      if (!ocrText || ocrText === 'NONE') return 'None';
-
-      console.log(`Validating OCR result: "${ocrText}" against ${busRoutes.length} routes`);
-      if (individualWords && individualWords.length > 0) {
-        console.log(`Individual words: [${individualWords.map((w) => `"${w}"`).join(', ')}]`);
-      }
-
-      // Level 1: Check full text exact match
-      if (busRoutes.includes(ocrText)) return ocrText;
-
-      // Level 2: Check individual words for exact matches (most efficient for cases like "123" in mixed text)
-      if (individualWords && individualWords.length > 0) {
-        for (const word of individualWords) {
-          const normalizedWord = normalizeBusNumber(word);
-          if (normalizedWord && busRoutes.includes(normalizedWord)) {
-            console.log(`Found exact match in individual word: "${word}" → "${normalizedWord}"`);
-            return normalizedWord;
-          }
-        }
-      }
-
-      // Level 3: Check if full text contains a valid route
-      for (const r of busRoutes)
-        if (ocrText.includes(r) && r.length >= ocrText.length * 0.5) return r;
-
-      // Level 4: Check if valid route contains the OCR text
-      for (const r of busRoutes)
-        if (r.includes(ocrText) && ocrText.length >= r.length * 0.6) return r;
-
-      // Level 5: Fuzzy match with Levenshtein distance
-      let best = 'None',
-        bestD = Infinity;
-      for (const r of busRoutes) {
-        const d = levenshteinDistance(ocrText, r);
-        if (d <= 1 && Math.abs(ocrText.length - r.length) <= 1 && d < bestD) {
-          best = r;
-          bestD = d;
-        }
-      }
-      return best !== 'None' ? best : 'None';
-    },
-    [normalizeBusNumber]
-  );
-
-  // ---------------------------------- model init -----------------------------------------
+  // ---------------------------------- Initialize services on component mount -----------------------------------------
+  // This runs ONCE when the component mounts (browser startup)
+  // Independent of camera state - ready before user needs them
   useEffect(() => {
-    if (showCamera && !modelLoaded && !modelRef.current) {
-      (async () => {
-        try {
-          setModelStatus('Initializing LiteRT…');
-          await literTModelManager.initialize();
+    let mounted = true;
 
-          setModelStatus('Loading model…');
-          modelRef.current = await literTModelManager.loadModel('/models/yolo_trained.tflite');
+    (async () => {
+      try {
+        setModelStatus('Initializing services...');
 
+        // Initialize all services in parallel for fastest startup
+        await Promise.all([
+          modelService.initialize('/models/yolo_trained.tflite'),
+          ocrService.warmup(),
+          ttsService.warmup(),
+        ]);
+
+        if (mounted) {
           setModelLoaded(true);
-          setModelStatus('Model ready - detecting bus number plates');
-          console.log('LiteRT model loaded successfully!');
-
-          // Warm up OCR API in background to avoid cold start on first detection
-          warmupOCRAPI().catch((err) => {
-            console.warn('OCR warmup failed (non-critical):', err);
-          });
-        } catch (e: any) {
-          const errorMsg = `Init error: ${e?.message ?? e}`;
-          setModelStatus(errorMsg);
-          console.error('Model loading error:', errorMsg, e);
+          setModelStatus('Ready - services initialized');
+          console.log('[CameraComponent] ✅ All services initialized successfully');
         }
-      })();
-    }
-  }, [showCamera, modelLoaded]);
+      } catch (e: any) {
+        const errorMsg = `Service initialization error: ${e?.message ?? e}`;
+        if (mounted) {
+          setModelStatus(errorMsg);
+        }
+        console.error('[CameraComponent] Service initialization error:', errorMsg, e);
+      }
+    })();
+
+    return () => {
+      mounted = false;
+    };
+  }, []); // Run once on mount
 
   // ----------------------------------- detection loop lifecycle -----------------------------------
   useEffect(() => {
-    if (showCamera && modelLoaded && modelRef.current) {
+    if (showCamera && modelLoaded && modelService.isReady()) {
       console.log('Starting detection loop…');
       startLoop();
       return () => {
@@ -287,11 +304,13 @@ export function CameraComponent() {
     } else {
       stopLoop();
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [showCamera, modelLoaded]);
 
   const startLoop = useCallback(() => {
     stopLoop();
     detectionIntervalRef.current = setInterval(runDetection, DETECTION_INTERVAL_MS);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [DETECTION_INTERVAL_MS]);
 
   const stopLoop = useCallback(() => {
@@ -330,9 +349,15 @@ export function CameraComponent() {
   const clearAllStates = () => {
     console.log('Clearing all states…');
 
-    // Abort any in-flight OCR requests
+    // Abort any in-flight OCR requests and clear callbacks
     parallelOCRProcessor.abortAll();
+    parallelOCRProcessor.setValidationCallback(null);
     parallelOCRProcessor.setMatchCallback(null);
+    parallelOCRProcessor.setShouldAbortCheck(null);
+
+    // Reset service states
+    ttsService.resetAnnouncements();
+    audioService.reset();
 
     setPlateDetections([]);
     setOcrResults([]);
@@ -345,7 +370,7 @@ export function CameraComponent() {
     processedObjectsRef.current.clear();
     announcedBusesRef.current.clear();
     matchFoundRef.current = false;
-    targetBusNumberRef.current = '';
+    targetBusNumberRef.current = [];
     validBusRoutesRef.current = [];
     frameTimesRef.current = [];
     performanceScores.current = [];
@@ -357,162 +382,52 @@ export function CameraComponent() {
 
   const unlockAudio = useCallback(async () => {
     try {
-      // Prime an Audio element for iOS - CRITICAL for iOS Safari
-      if (!primedAudioRef.current) {
-        const audio = new Audio();
-        audio.preload = 'none';
-        (audio as any).playsInline = true;
-        audio.muted = false;
-
-        // Load a silent data URL to "prime" the audio element
-        audio.src =
-          'data:audio/mp3;base64,SUQzBAAAAAAAI1RTU0UAAAAPAAADTGF2ZjU4Ljc2LjEwMAAAAAAAAAAAAAAA//tQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWGluZwAAAA8AAAACAAADhAC7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7//////////////////////////////////////////////////////////////////8AAAAATGF2YzU4LjEzAAAAAAAAAAAAAAAAJAAAAAAAAAAAA4T0LnrfAAAAAAAAAAAAAAAAAAAAAP/7UGQAD/AAAGkAAAAIAAANIAAAAQAAAaQAAAAgAAA0gAAABExBTUUzLjEwMFVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVQ==';
-
-        // Play silence to unlock - this MUST happen during user gesture
-        try {
-          await audio.play();
-          audio.pause();
-          audio.currentTime = 0;
-        } catch (e) {
-          console.warn('[Audio] Play/pause during unlock failed:', e);
-        }
-
-        primedAudioRef.current = audio;
-        console.log('[Audio] Primed audio element for iOS');
-      }
-
-      const Ctx =
-        (window as any).AudioContext ||
-        (window as any).webkitAudioContext ||
-        (window as any).webkitaudioContext;
-
-      if (Ctx) {
-        if (!audioCtxRef.current) {
-          audioCtxRef.current = new Ctx();
-        }
-        const ctx = audioCtxRef.current as AudioContext;
-
-        await ctx.resume();
-        const buf = ctx.createBuffer(1, 1, ctx.sampleRate);
-        const src = ctx.createBufferSource();
-        src.buffer = buf;
-        src.connect(ctx.destination);
-        src.start(0);
-        console.log('[Audio] WebAudio context unlocked');
-      }
-
-      setAudioReady(true);
-      setAudioHint('');
-      console.log('[Audio] Unlocked successfully');
+      await audioService.unlock();
+      setAudioReady(audioService.isReady());
+      setAudioHint(audioService.getHintMessage());
     } catch (e) {
-      console.warn('[Audio] Unlock failed:', e);
+      console.warn('[CameraComponent] Audio unlock error:', e);
       setAudioReady(true);
-      setAudioHint("Tap again if you still can't hear audio.");
+      setAudioHint(audioService.getHintMessage());
     }
   }, []);
 
-  const playTTSAnnouncement = async (busNumber: string): Promise<void> => {
-    if (announcedBusesRef.current.has(busNumber)) {
+  // Immediate TTS without popup (popup shown separately in parallel)
+  const playTTSAnnouncementImmediate = async (busNumber: string): Promise<void> => {
+    if (ttsService.hasAnnounced(busNumber)) {
       console.log(`Skipping TTS for ${busNumber} - already announced`);
       return;
     }
+
     try {
       const text = `Bus ${busNumber} has arrived.`;
-      announcedBusesRef.current.add(busNumber);
+      const ttsStartTime = performance.now();
 
-      // Show popup notification
-      toastAlert({
-        title: 'Bus Arrived!',
-        description: `Bus ${busNumber} has arrived.`,
-      });
+      console.log(`[TTS] Starting TTS generation for "${text}"...`);
 
-      const response = await fetch('/api/tts', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ text }),
-      });
-
-      if (!response.ok) {
-        console.error(`TTS API error: ${response.statusText}`);
-        announcedBusesRef.current.delete(busNumber);
-        return;
-      }
-
-      const audioBlob = await response.blob();
+      // Generate audio using TTS service
+      const audioBlob = await ttsService.generateAudio(text);
 
       try {
-        const hasWebAudio =
-          typeof window !== 'undefined' &&
-          !!(
-            (window as any).AudioContext ||
-            (window as any).webkitAudioContext ||
-            (window as any).webkitaudioContext
-          );
+        // Play audio using audio service
+        console.log(`[TTS] Starting playback...`);
+        await audioService.playAudio(audioBlob);
 
-        // Prefer WebAudio when unlocked (best on iOS)
-        if (audioReady && hasWebAudio && audioCtxRef.current) {
-          const ctx = audioCtxRef.current as AudioContext;
+        const totalTime = performance.now() - ttsStartTime;
+        console.log(`[TTS] ✅ Playback completed (total time: ${totalTime.toFixed(2)}ms)`);
 
-          await ctx.resume();
-          const arrayBuf = await audioBlob.arrayBuffer();
-          const audioBuf = await new Promise<AudioBuffer>((resolve, reject) => {
-            ctx.decodeAudioData(arrayBuf, resolve, reject);
-          });
-
-          const src = ctx.createBufferSource();
-          src.buffer = audioBuf;
-          src.connect(ctx.destination);
-          src.start(0);
-
-          src.onended = () => {
-            console.log('TTS playback finished (WebAudio)');
-            setShowCamera(false);
-            setTimeout(() => clearAllStates(), 300);
-          };
-        } else {
-          // Use primed audio element for iOS - CRITICAL for iOS Safari
-          const audio = primedAudioRef.current || new Audio();
-
-          // Configure for iOS
-          (audio as any).playsInline = true;
-          audio.muted = false;
-          audio.preload = 'auto';
-
-          // Create object URL and set as source
-          const audioUrl = URL.createObjectURL(audioBlob);
-          audio.src = audioUrl;
-
-          // Load the audio
-          await audio.load();
-
-          // Play - this should work because the audio element was primed during user gesture
-          await audio.play();
-
-          audio.onended = () => {
-            URL.revokeObjectURL(audioUrl);
-            console.log('TTS playback finished (HTMLAudio)');
-            setShowCamera(false);
-            setTimeout(() => clearAllStates(), 300);
-          };
-
-          audio.onerror = (e) => {
-            console.error('Audio playback error:', e);
-            URL.revokeObjectURL(audioUrl);
-            announcedBusesRef.current.delete(busNumber);
-          };
-        }
-      } catch (err: any) {
+        // Close camera after TTS finishes
+        setShowCamera(false);
+        setTimeout(() => clearAllStates(), 300);
+      } catch (err: unknown) {
         console.error('Error playing TTS:', err);
-        if (String(err?.name || err).includes('NotAllowedError')) {
-          setAudioHint(
-            'Tap "Enable sound" to allow audio, then I\'ll speak automatically next time.'
-          );
+        const errorName = err instanceof Error ? err.name : String(err);
+        if (errorName.includes('NotAllowedError')) {
+          setAudioHint(audioService.getHintMessage());
         }
-        announcedBusesRef.current.delete(busNumber);
       }
     } catch (error) {
-      console.error('TTS error:', error);
-      announcedBusesRef.current.delete(busNumber);
+      console.error('TTS generation error:', error);
     }
   };
 
@@ -539,69 +454,18 @@ export function CameraComponent() {
     const vw = Math.min(video.videoWidth - vx, w + 2 * w * pad);
     const vh = Math.min(video.videoHeight - vy, h + 2 * h * pad);
 
-    const c = document.createElement('canvas');
+    // Reuse canvas instead of creating new one for each crop (reduces GC pressure)
+    if (!cropCanvasRef.current) {
+      cropCanvasRef.current = document.createElement('canvas');
+    }
+    const c = cropCanvasRef.current;
     c.width = vw;
     c.height = vh;
     const g = c.getContext('2d');
     if (!g) return '';
     g.drawImage(video, vx, vy, vw, vh, 0, 0, vw, vh);
-    // Reduced quality from 0.95 to 0.85 for smaller payload and faster network transfer
-    return c.toDataURL('image/jpeg', 0.85);
-  };
 
-  async function saveImageAsync(imageDataUrl: string, filename: string): Promise<void> {
-    try {
-      const response = await fetch('/api/save-image', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ image: imageDataUrl, filename }),
-      });
-      if (response.ok) {
-        const result = await response.json();
-        console.log(`Image saved: ${result.path}`);
-      } else {
-        console.error('Save image error:', response.statusText);
-      }
-    } catch (error) {
-      console.error('Save image network error:', error);
-    }
-  }
-
-  const annotateAndSaveImage = (
-    imageData: string,
-    text: string,
-    confidence: number,
-    filename: string
-  ) => {
-    const img = new Image();
-    img.onload = () => {
-      const canvas = document.createElement('canvas');
-      canvas.width = img.width;
-      canvas.height = img.height;
-      const ctx = canvas.getContext('2d');
-      if (!ctx) return;
-
-      ctx.drawImage(img, 0, 0);
-
-      const fontSize = Math.max(20, Math.floor(img.height / 10));
-      ctx.font = `bold ${fontSize}px Arial`;
-      ctx.fillStyle = 'rgba(0, 255, 0, 0.9)';
-      ctx.strokeStyle = 'rgba(0, 0, 0, 0.8)';
-      ctx.lineWidth = 3;
-
-      const label = `${text} (${(confidence * 100).toFixed(1)}%)`;
-      const tm = ctx.measureText(label);
-      const pad = 10;
-
-      ctx.fillRect(0, 0, tm.width + pad * 2, fontSize + pad * 2);
-      ctx.strokeText(label, pad, fontSize + pad / 2);
-      ctx.fillStyle = '#000000';
-      ctx.fillText(label, pad, fontSize + pad / 2);
-
-      const annotated = canvas.toDataURL('image/jpeg', 0.95);
-      saveImageAsync(annotated, filename);
-    };
-    img.src = imageData;
+    return c.toDataURL('image/jpeg', 0.75);
   };
 
   function drawBoxes(dets: Detection[], w: number, h: number) {
@@ -668,29 +532,13 @@ export function CameraComponent() {
     });
   }
 
-  // --------------------------------------- OCR call ---------------------------------------
-  async function runOCR(imgDataUrl: string): Promise<string> {
-    const t = performanceMonitor.start(METRICS.OCR);
-    try {
-      // Use parallel OCR processor which handles immediate matching
-      // The processor now passes individual words to the match callback automatically
-      const normalized = await parallelOCRProcessor.processOCR(imgDataUrl);
-      console.log(`OCR result: "${normalized}"`);
-      return normalized || 'None';
-    } catch (error) {
-      console.error('OCR processing error:', error);
-      return 'None';
-    } finally {
-      performanceMonitor.end(t);
-    }
-  }
-
-  // ------------------------------ Main detection pipeline ---------------------------------
+  // ------------------------------ Main detection pipeline with TRUE parallelism ---------------------------------
   const runDetection = useCallback(async () => {
     const video = webcamRef.current?.video as HTMLVideoElement | undefined;
-    const model = modelRef.current;
-    if (!video || !model || video.readyState !== 4) return;
 
+    if (!video || video.readyState !== 4 || !modelService.isReady()) return;
+
+    // Early exit if match already found
     if (matchFoundRef.current) return;
 
     frameCountRef.current++;
@@ -731,8 +579,8 @@ export function CameraComponent() {
       );
 
       const infId = performanceMonitor.start(METRICS.INFERENCE);
-      const raw = await literTModelManager.runInference(model, inputTensor);
-      const inferenceTime = performanceMonitor.end(infId);
+      const raw = await literTModelManager.runInference(modelService.getModel(), inputTensor);
+      performanceMonitor.end(infId);
 
       const postId = performanceMonitor.start(METRICS.POSTPROCESSING);
       const boxes = literTModelManager.processDetections(
@@ -744,7 +592,6 @@ export function CameraComponent() {
         padY,
         YOLO_CONF,
         YOLO_IOU,
-        INPUT_SIZE,
         {
           classNames: CLASS_NAMES,
           allowedClassNames: ALLOWED,
@@ -785,9 +632,6 @@ export function CameraComponent() {
 
       if (!boxes.length) return;
 
-      const targetBusRaw = targetBusNumberRef.current;
-      const targetBus = normalizeBusNumber(targetBusRaw);
-
       boxes.forEach((det, idx) => {
         const [x, y, w, h] = det.bbox;
         console.log(
@@ -797,83 +641,114 @@ export function CameraComponent() {
         );
       });
 
-      await Promise.all(
-        boxes.map(async (det) => {
-          // Early exit if match already found
-          if (matchFoundRef.current) {
-            console.log('Skipping detection - match already found');
-            return;
+      // ==================== PARALLEL PROCESSING ====================
+      // Launch INDEPENDENT threads for each detection
+      // Each thread runs: OCR → Validation → Match Check → TTS
+      // First thread to match triggers TTS and aborts all others
+      // No waiting, no batching, pure parallelism for minimum latency
+      // ==================================================================
+
+      console.log(`Launching ${boxes.length} independent parallel pipelines...`);
+
+      const parallelPipelines = boxes.map(async (det, detectionIndex) => {
+        // Early exit if match already found
+        if (matchFoundRef.current) {
+          console.log(`[Det ${detectionIndex}] Skipping - match already found`);
+          return;
+        }
+
+        if (det.confidence < 0.25) {
+          console.log(
+            `[Det ${detectionIndex}] Skipping low confidence: ${(det.confidence * 100).toFixed(1)}%`
+          );
+          return;
+        }
+
+        const objectId = generateObjectId(det.bbox);
+        const now = Date.now();
+
+        // Check cooldown
+        const lastProcessedTime = processedObjectsRef.current.get(objectId);
+        if (lastProcessedTime && now - lastProcessedTime < OBJECT_COOLDOWN_MS) {
+          console.log(`[Det ${detectionIndex}] Object ${objectId} in cooldown`);
+          return;
+        }
+
+        // Check if already processing
+        if (processingIdsRef.current.has(objectId)) {
+          console.log(`[Det ${detectionIndex}] Object ${objectId} already processing`);
+          return;
+        }
+
+        // Mark as processing
+        processingIdsRef.current.add(objectId);
+
+        try {
+          // Crop image for this detection
+          const crop = cropWithPadding(video, det.bbox, 0.4);
+
+          // Create abort controller for this thread
+          const abortController = new AbortController();
+
+          // Record detection time for latency tracking
+          const detectionTime = performance.now();
+
+          // Run COMPLETE pipeline in this independent thread
+          // Pipeline includes: OCR → Validation → Match Check → TTS
+          const result = await parallelOCRProcessor.processPipeline({
+            image: crop,
+            objectId,
+            detectionIndex,
+            timestamp: Date.now(),
+            detectionTime, // Track from detection to TTS
+            abortController,
+          });
+
+          // Mark as processed
+          processedObjectsRef.current.set(objectId, Date.now());
+
+          // Update UI with detection if successful and not aborted and no match found yet
+          if (
+            result.success &&
+            !result.wasAborted &&
+            result.text !== 'None' &&
+            !matchFoundRef.current
+          ) {
+            setDetectedBuses((prev) => new Map(prev).set(objectId, result.text));
+            setOcrResults((prev) => [result.text, ...prev].slice(0, 5));
           }
 
-          if (det.confidence < 0.5) {
-            console.log(
-              `[Detection] Skipping low confidence detection: ${(det.confidence * 100).toFixed(1)}%`
-            );
-            return;
-          }
+          console.log(
+            `[Det ${detectionIndex}] Pipeline finished: ${result.text} (${result.processingTime.toFixed(2)}ms)`
+          );
+        } catch (err) {
+          console.error(`[Det ${detectionIndex}] Pipeline error:`, err);
+        } finally {
+          // Clean up
+          processingIdsRef.current.delete(objectId);
+        }
+      });
 
-          const objectId = generateObjectId(det.bbox);
-          const now = Date.now();
-
-          const lastProcessedTime = processedObjectsRef.current.get(objectId);
-          if (lastProcessedTime && now - lastProcessedTime < OBJECT_COOLDOWN_MS) return;
-          if (processingIdsRef.current.has(objectId)) return;
-
-          processingIdsRef.current.add(objectId);
-
-          try {
-            const crop = cropWithPadding(video, det.bbox, 0.4);
-
-            // // Save the cropped image before OCR
-            // const cropFilename = `crop_${objectId}_${Date.now()}.jpg`;
-            // saveImageAsync(crop, cropFilename);
-
-            const ocrStart = performance.now();
-            // OCR processing with automatic match detection via callback
-            const ocrNorm = await runOCR(crop);
-            const ocrMs = performance.now() - ocrStart;
-
-            processedObjectsRef.current.set(objectId, Date.now());
-            processingIdsRef.current.delete(objectId);
-
-            // Validate the result
-            const validated = findClosestValidRoute(ocrNorm);
-
-            if (!validated || validated === 'None') return;
-
-            // Check if match was found during OCR (callback sets this)
-            if (matchFoundRef.current) {
-              console.log('Match found during OCR processing, stopping');
-              return;
-            }
-
-            // // Save annotated image with detected text and confidence
-            // const annotatedFilename = `annotated_${objectId}_${validated}_${Math.round(
-            //   (det.confidence || 0) * 100
-            // )}_${Date.now()}.jpg`;
-            // annotateAndSaveImage(crop, validated, det.confidence || 0, annotatedFilename);
-
-            // Update UI with detection
-            setDetectedBuses((prev) => new Map(prev).set(objectId, validated));
-            setOcrResults((prev) => [validated, ...prev].slice(0, 5));
-          } catch (err) {
-            console.error('❌ Detection item error:', err);
-            processingIdsRef.current.delete(objectId);
-          }
-        })
-      );
+      // Fire all pipelines in parallel - DO NOT WAITt
+      // First one to match will trigger TTS and abort the rest
+      Promise.allSettled(parallelPipelines).catch((err) => {
+        console.error('❌ Parallel pipeline error:', err);
+      });
     } catch (e) {
       console.error('❌ Detection pipeline error:', e);
     } finally {
       performanceMonitor.end(pipelineTimer);
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [
     generateObjectId,
     sendResponse,
     stopLoop,
-    normalizeBusNumber,
-    findClosestValidRoute,
     frameRate,
+    ALLOWED,
+    CLASS_NAMES,
+    YOLO_CONF,
+    isMobile,
   ]);
 
   // ---------------------------------------- UI ----------------------------------------
@@ -907,9 +782,9 @@ export function CameraComponent() {
             border: '2px solid #fa0',
           }}
         >
-          <div>{modelStatus}</div>
+          {/* <div>{modelStatus}</div> */}
           <div style={{ fontSize: '.9rem', marginTop: 10, opacity: 0.8 }}>
-            Please wait while the model is loading...
+            Loading...Please wait!
           </div>
         </div>
       )}
@@ -998,42 +873,21 @@ export function CameraComponent() {
       >
         <strong>Model:</strong> {modelLoaded ? 'Loaded Successfully' : 'Loading…'}
         <br />
-        <strong>Detection:</strong>{' '}
+        <strong>Number plate Detection:</strong>{' '}
         {plateDetections.length ? ` ${plateDetections.length} plate(s)` : 'Scanning…'}
         <br />
-        <strong>Detected Buses:</strong>{' '}
+        <strong>OCR Detections:</strong>{' '}
         {detectedBuses.size ? Array.from(detectedBuses.values()).join(', ') : 'None yet'}
-        {lastQuery?.bus_number && (
-          <>
-            <br />
-            <strong>Target Bus:</strong> {lastQuery.bus_number} (Normalized:{' '}
-            {normalizeBusNumber(lastQuery.bus_number)})
-          </>
-        )}
+        <br />
+        {lastQuery?.bus_numbers &&
+          Array.isArray(lastQuery.bus_numbers) &&
+          lastQuery.bus_numbers.length > 0 && (
+            <>
+              <strong>Target Bus Numbers:</strong> [
+              {lastQuery.bus_numbers.map((b) => normalizeBusNumber(b)).join(', ')}]
+            </>
+          )}
       </div>
-
-      {ocrResults.length > 0 && (
-        <div
-          style={{
-            marginTop: 8,
-            padding: 10,
-            background: 'rgba(0,255,0,0.15)',
-            borderRadius: 8,
-            fontSize: '.8rem',
-            maxWidth: 600,
-            width: '90%',
-            maxHeight: 100,
-            overflowY: 'auto',
-          }}
-        >
-          <strong>Recent Detections:</strong>
-          {ocrResults.map((t, i) => (
-            <div key={i} style={{ marginTop: 4 }}>
-              {i + 1}. {t}
-            </div>
-          ))}
-        </div>
-      )}
 
       <button
         onClick={() => {

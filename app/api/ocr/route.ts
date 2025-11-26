@@ -1,9 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
-import path from 'path';
 import vision from '@google-cloud/vision';
 
-// Initialize the Vision API client with credentials from environment variables
-// Client is initialized once and reused across requests (singleton pattern)
+// Client is initialized once and reused across requests
 const client = new vision.ImageAnnotatorClient({
   credentials: {
     client_email: process.env.VISION_OCR_CLIENT_EMAIL,
@@ -19,7 +17,35 @@ export const runtime = 'nodejs'; // Use Node.js runtime for better performance w
 export async function POST(request: NextRequest) {
   const startTime = performance.now();
   try {
-    const { image } = await request.json();
+    // Check if request was aborted before processing
+    if (request.signal?.aborted) {
+      console.log('OCR request aborted before processing');
+      return NextResponse.json(
+        { error: 'Request aborted', success: false, text: 'None' },
+        { status: 499 }
+      );
+    }
+
+    let body;
+    try {
+      body = await request.json();
+    } catch (jsonError) {
+      // Handle JSON parse errors (usually from aborted requests)
+      if (request.signal?.aborted) {
+        console.log('OCR request aborted during JSON parsing');
+        return NextResponse.json(
+          { error: 'Request aborted', success: false, text: 'None' },
+          { status: 499 }
+        );
+      }
+      console.error('OCR JSON parse error:', jsonError);
+      return NextResponse.json(
+        { error: 'Invalid JSON in request body', success: false },
+        { status: 400 }
+      );
+    }
+
+    const { image } = body;
 
     if (!image) {
       return NextResponse.json({ error: 'No image provided' }, { status: 400 });
@@ -47,20 +73,10 @@ export async function POST(request: NextRequest) {
       });
     }
 
-    console.log('✅ Text Detection Results:');
-    console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+    console.log('-----------Text Detection Results:');
 
     // First detection contains all text
     const fullText = detections[0]?.description || '';
-    console.log('Full Text:', fullText);
-    console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-
-    // Individual word detections
-    console.log('Individual Words:');
-    detections.slice(1).forEach((text, index) => {
-      console.log(`  ${index + 1}. "${text.description}"`);
-    });
-    console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
 
     // Extract individual words (excluding the first full-text detection)
     const individualWords = detections
@@ -75,7 +91,7 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({
       success: true,
       text: fullText,
-      individualWords, // Array of individual words for better matching
+      individualWords,
       detections: detections.map((detection) => ({
         text: detection.description,
         bounds: detection.boundingPoly,

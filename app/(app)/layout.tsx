@@ -7,7 +7,7 @@ interface LayoutProps {
 
 export default async function Layout({ children }: LayoutProps) {
   const hdrs = await headers();
-  const { companyName, logo, logoDark } = await getAppConfig(hdrs);
+  const { companyName, logo } = await getAppConfig(hdrs);
 
   return (
     <>
@@ -17,13 +17,12 @@ export default async function Layout({ children }: LayoutProps) {
           rel="noopener noreferrer"
           className="scale-100 transition-transform duration-300 hover:scale-110"
         >
-          {/* eslint-disable-next-line @next/next/no-img-element */}
           <img src={logo} alt={`${companyName} Logo`} className="block size-6 dark:hidden" />
-          {/* eslint-disable-next-line @next/next/no-img-element */}
           <img
-          // src={logoDark ?? logo}
-          // alt={`${companyName} Logo`}
-          // className="hidden size-6 dark:block"
+            alt=""
+            // src={logoDark ?? logo}
+            // alt={`${companyName} Logo`}
+            // className="hidden size-6 dark:block"
           />
         </a>
       </header>
