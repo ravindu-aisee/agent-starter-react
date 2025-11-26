@@ -29,8 +29,9 @@ export async function POST(req: NextRequest) {
     // Return public URL path for client display if needed
     const publicUrl = '/' + safeRelPath.replace(/\\/g, '/');
     return NextResponse.json({ ok: true, path: publicUrl });
-  } catch (e: any) {
+  } catch (e: unknown) {
+    const err = e as { message?: string };
     console.error('save-image error:', e);
-    return NextResponse.json({ error: e?.message ?? 'Server error' }, { status: 500 });
+    return NextResponse.json({ error: err?.message ?? 'Server error' }, { status: 500 });
   }
 }

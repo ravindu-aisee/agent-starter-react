@@ -9,7 +9,7 @@ interface PerformanceMetric {
   startTime: number;
   endTime?: number;
   duration?: number;
-  metadata?: Record<string, any>;
+  metadata?: Record<string, unknown>;
 }
 
 interface PerformanceStats {
@@ -29,7 +29,7 @@ class PerformanceMonitor {
   /**
    * Start timing a metric
    */
-  start(metricName: string, metadata?: Record<string, any>): string {
+  start(metricName: string, metadata?: Record<string, unknown>): string {
     const id = `${metricName}_${Date.now()}_${Math.random()}`;
     const startTime = performance.now();
 
@@ -62,7 +62,7 @@ class PerformanceMonitor {
   end(id: string): number {
     const startTime = this.activeTimers.get(id);
     if (!startTime) {
-      console.warn(`⚠️ No active timer found for ID: ${id}`);
+      console.warn(`No active timer found for ID: ${id}`);
       return 0;
     }
 
@@ -72,7 +72,7 @@ class PerformanceMonitor {
     this.activeTimers.delete(id);
 
     // Find and update the metric
-    for (const [metricName, metrics] of this.metrics) {
+    for (const metrics of this.metrics.values()) {
       const metric = metrics.find((m) => !m.endTime && Math.abs(m.startTime - startTime) < 1);
       if (metric) {
         metric.endTime = endTime;
@@ -87,7 +87,7 @@ class PerformanceMonitor {
   /**
    * Record an instant metric
    */
-  record(metricName: string, value: number, metadata?: Record<string, any>) {
+  record(metricName: string, value: number, metadata?: Record<string, unknown>) {
     const metric: PerformanceMetric = {
       name: metricName,
       startTime: performance.now(),
@@ -160,7 +160,7 @@ class PerformanceMonitor {
    * Log performance summary
    */
   logSummary() {
-    console.log('📊 Performance Summary:');
+    console.log('Performance Summary:');
     console.log('━'.repeat(80));
 
     const allStats = this.getAllStats();

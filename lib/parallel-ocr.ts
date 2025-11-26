@@ -1,84 +1,158 @@
 /**
- * Parallel OCR Processing System
+ * Parallel OCR Processing System with True Thread Independence
  *
  * Features:
- * - Request batching for efficiency
- * - Parallel processing with concurrency control
- * - Request deduplication
- * - Performance monitoring
+ * - TRUE parallel processing - each detection runs independently
+ * - Each thread: OCR → Validation → Match Check → TTS (all within same thread)
+ * - First match wins - immediately triggers TTS and aborts all other threads
+ * - Semaphore-based concurrency control (max 10 threads)
+ * - Dynamic queue processing - threads start as soon as slot opens
+ * - Detailed per-thread timing logs from detection to TTS
+ * - Global abort mechanism when match is found
  */
 
-interface OCRRequest {
-  id: string;
+interface OCRPipelineContext {
   image: string;
+  objectId: number;
+  detectionIndex: number;
   timestamp: number;
-  abortController?: AbortController;
+  detectionTime: number; // When object was detected
+  abortController: AbortController;
 }
 
-interface OCRResult {
-  id: string;
+interface OCRPipelineResult {
+  objectId: number;
   text: string;
+  individualWords: string[];
   success: boolean;
   processingTime: number;
-  wasAborted?: boolean;
+  wasAborted: boolean;
+  timingLog?: ThreadTimingLog;
 }
 
-interface OCRQueueItem {
-  request: OCRRequest;
-  resolve: (result: OCRResult) => void;
+interface QueuedPipeline {
+  context: OCRPipelineContext;
+  resolve: (result: OCRPipelineResult) => void;
   reject: (error: Error) => void;
+  queuedAt: number;
 }
 
-export interface OCRMatchCallback {
-  (normalizedText: string, rawText: string, individualWords?: string[]): boolean;
+interface ThreadTimingLog {
+  objectId: number;
+  detectionIndex: number;
+  detectionTime: number;
+  queuedTime?: number;
+  queueWaitTime?: number;
+  startTime: number;
+  ocrStartTime?: number;
+  ocrEndTime?: number;
+  ocrDuration?: number;
+  validationStartTime?: number;
+  validationEndTime?: number;
+  validationDuration?: number;
+  matchCheckTime?: number;
+  ttsTriggeredTime?: number;
+  endTime: number;
+  totalDuration: number;
+  detectionToTTSDuration?: number; // Total time from detection to TTS
+  wasAborted: boolean;
+}
+
+export interface ValidationCallback {
+  (normalizedText: string, individualWords?: string[]): string; // Returns validated bus number or 'None'
+}
+
+export interface MatchCallback {
+  (validatedBusNumber: string, objectId: number, ttsTrigger: () => Promise<void>): Promise<void>; // Checks match and provides TTS trigger
+}
+
+export interface ShouldAbortCheck {
+  (): boolean; // Check if processing should be aborted
 }
 
 class ParallelOCRProcessor {
-  private queue: OCRQueueItem[] = [];
-  private processing = new Set<string>();
-  private maxConcurrentRequests: number;
-  private batchSize: number;
-  private batchTimeout: number;
-  private batchTimer: NodeJS.Timeout | null = null;
-  private cache = new Map<string, OCRResult>();
-  private cacheTimeout = 5000; // 5 seconds cache
-  private matchCallback: OCRMatchCallback | null = null;
+  private activeThreads = new Map<number, AbortController>();
   private shouldAbortAll = false;
-  private activeAbortControllers = new Set<AbortController>();
+  private validationCallback: ValidationCallback | null = null;
+  private matchCallback: MatchCallback | null = null;
+  private shouldAbortCheck: ShouldAbortCheck | null = null;
+  private readonly maxConcurrentThreads: number;
+  private queue: QueuedPipeline[] = [];
+  private runningCount = 0;
+  private threadTimingLogs: ThreadTimingLog[] = [];
+  private requestedBusNumbers: Set<string> = new Set();
 
-  constructor(maxConcurrentRequests: number = 3, batchSize: number = 1, batchTimeout: number = 50) {
-    this.maxConcurrentRequests = maxConcurrentRequests;
-    this.batchSize = batchSize;
-    this.batchTimeout = batchTimeout;
+  constructor(maxConcurrentThreads: number = 10) {
+    this.maxConcurrentThreads = maxConcurrentThreads;
+    console.log(
+      `ParallelOCRProcessor initialized with max ${maxConcurrentThreads} concurrent threads`
+    );
   }
 
   /**
-   * Set callback function to check if OCR result matches target
-   * Returns true if match found and processing should stop
+   * Set validation callback to validate and normalize OCR results
    */
-  setMatchCallback(callback: OCRMatchCallback | null) {
+  setValidationCallback(callback: ValidationCallback | null) {
+    this.validationCallback = callback;
+  }
+
+  /**
+   * Set match callback to trigger TTS immediately when match is found
+   */
+  setMatchCallback(callback: MatchCallback | null) {
     this.matchCallback = callback;
   }
 
   /**
-   * Abort all in-flight OCR requests
+   * Set abort check callback
+   */
+  setShouldAbortCheck(callback: ShouldAbortCheck | null) {
+    this.shouldAbortCheck = callback;
+  }
+
+  /**
+   * Set user-requested bus numbers for lookup during OCR processing
+   */
+  setRequestedBusNumbers(busNumbers: string[]) {
+    this.requestedBusNumbers = new Set(busNumbers);
+    console.log(`Requested bus numbers set: [${Array.from(this.requestedBusNumbers).join(', ')}]`);
+  }
+
+  /**
+   * Abort all in-flight OCR threads and clear queue
    */
   abortAll() {
-    console.log('Aborting all OCR requests...');
+    console.log('🛑 Aborting all OCR threads...');
     this.shouldAbortAll = true;
 
-    // Abort all active requests
-    this.activeAbortControllers.forEach((controller) => {
+    // Abort all active threads
+    this.activeThreads.forEach((controller, objectId) => {
       try {
+        console.log(`Aborting thread ${objectId}`);
         controller.abort();
       } catch (e) {
-        console.warn('Error aborting controller:', e);
+        console.warn(`Error aborting thread ${objectId}:`, e);
       }
     });
 
-    this.activeAbortControllers.clear();
+    this.activeThreads.clear();
+
+    // Clear the queue - reject all queued items
+    const queuedCount = this.queue.length;
+    this.queue.forEach((item) => {
+      item.resolve({
+        objectId: item.context.objectId,
+        text: 'None',
+        individualWords: [],
+        success: false,
+        processingTime: 0,
+        wasAborted: true,
+      });
+    });
     this.queue = [];
-    this.processing.clear();
+    this.runningCount = 0;
+
+    console.log(`✅ All threads aborted (${queuedCount} queued items cleared)`);
   }
 
   /**
@@ -86,239 +160,433 @@ class ParallelOCRProcessor {
    */
   reset() {
     this.shouldAbortAll = false;
-    this.activeAbortControllers.clear();
+    this.activeThreads.clear();
+    this.queue = [];
+    this.runningCount = 0;
+    this.threadTimingLogs = [];
+    this.requestedBusNumbers.clear();
+    console.log('OCR processor reset for new detection cycle');
   }
 
   /**
-   * Process OCR request with automatic batching and parallelization
+   * Process COMPLETE pipeline for a single detection with concurrency control
+   * Pipeline: OCR → Validation → Match Check → TTS (all in same thread)
+   *
+   * Uses semaphore to limit concurrent threads to maxConcurrentThreads
+   * Queue processes dynamically - as soon as a thread finishes, next one starts
    */
-  async processOCR(image: string): Promise<string> {
-    if (this.shouldAbortAll) {
-      console.log('Skipping OCR - abort flag set');
-      return 'None';
-    }
+  async processPipeline(context: OCRPipelineContext): Promise<OCRPipelineResult> {
+    // Check if we can start immediately or need to queue
+    if (this.runningCount >= this.maxConcurrentThreads) {
+      const queuedAt = performance.now();
+      console.log(
+        `[Thread ${context.objectId}] Queue (${this.queue.length + 1}/${this.runningCount} running)`
+      );
 
-    const requestId = this.generateRequestId(image);
-
-    // Check cache first
-    const cached = this.cache.get(requestId);
-    if (cached && Date.now() - cached.processingTime < this.cacheTimeout) {
-      console.log(`✅ Using cached OCR result for request ${requestId}`);
-      return cached.text;
-    }
-
-    // Check if already processing
-    if (this.processing.has(requestId)) {
-      console.log(`⏳ Request ${requestId} already in progress, waiting...`);
-      return new Promise<string>((resolve, reject) => {
+      // Add to queue and wait
+      return new Promise<OCRPipelineResult>((resolve, reject) => {
         this.queue.push({
-          request: { id: requestId, image, timestamp: Date.now() },
-          resolve: (result) => resolve(result.text),
+          context: { ...context, timestamp: queuedAt },
+          resolve,
           reject,
+          queuedAt,
         });
       });
     }
 
-    return new Promise<string>((resolve, reject) => {
-      const abortController = new AbortController();
-      const request: OCRRequest = {
-        id: requestId,
-        image,
-        timestamp: Date.now(),
-        abortController,
-      };
-
-      this.queue.push({
-        request,
-        resolve: (result) => resolve(result.text),
-        reject,
-      });
-      this.processBatch();
-    });
+    // Acquire slot and run
+    return this.runPipeline(context);
   }
 
   /**
-   * Process batch of OCR requests
+   * Process next item from queue (called when a thread finishes)
    */
-  private async processBatch() {
-    // Clear existing timer
-    if (this.batchTimer) {
-      clearTimeout(this.batchTimer);
-      this.batchTimer = null;
-    }
-
-    // Check if we have capacity
-    const availableSlots = this.maxConcurrentRequests - this.processing.size;
-    if (availableSlots <= 0) {
-      console.log('⏸️ Max concurrent requests reached, queuing...');
+  private processQueue() {
+    if (this.queue.length === 0) {
       return;
     }
 
-    // Get items to process
-    const itemsToProcess = this.queue.splice(0, Math.min(availableSlots, this.batchSize));
-
-    if (itemsToProcess.length === 0) {
+    if (this.runningCount >= this.maxConcurrentThreads) {
       return;
     }
 
-    console.log(`🚀 Processing batch of ${itemsToProcess.length} OCR requests`);
+    // Get next item from queue
+    const item = this.queue.shift();
+    if (!item) return;
 
-    // Process items in parallel
-    const promises = itemsToProcess.map((item) => this.processRequest(item));
+    const queueWaitTime = performance.now() - item.queuedAt;
+    console.log(
+      `[Thread ${item.context.objectId}] Starting from queue (waited ${queueWaitTime.toFixed(2)}ms)`
+    );
 
-    // Wait for all to complete
-    await Promise.allSettled(promises);
-
-    // Process next batch if queue is not empty
-    if (this.queue.length > 0) {
-      this.processBatch();
-    }
+    // Run pipeline and handle result
+    this.runPipeline(item.context, queueWaitTime).then(item.resolve).catch(item.reject);
   }
 
   /**
-   * Process single OCR request
+   * Actually run the pipeline
    */
-  private async processRequest(item: OCRQueueItem): Promise<void> {
-    const { request, resolve, reject } = item;
+  private async runPipeline(
+    context: OCRPipelineContext,
+    queueWaitTime?: number
+  ): Promise<OCRPipelineResult> {
+    const { image, objectId, detectionIndex, detectionTime, abortController } = context;
     const startTime = performance.now();
 
+    // Initialize timing log
+    const timingLog: ThreadTimingLog = {
+      objectId,
+      detectionIndex,
+      detectionTime,
+      queuedTime: queueWaitTime !== undefined ? context.timestamp : undefined,
+      queueWaitTime,
+      startTime,
+      endTime: 0,
+      totalDuration: 0,
+      wasAborted: false,
+    };
+
+    // Acquire semaphore slot
+    this.runningCount++;
+    this.activeThreads.set(objectId, abortController);
+
+    console.log(
+      `[Thread ${objectId}] Starting pipeline (detection #${detectionIndex}) [${this.runningCount}/${this.maxConcurrentThreads} slots]`
+    );
+
     try {
-      if (this.shouldAbortAll) {
-        console.log(`⏹️ Skipping OCR request ${request.id} - abort flag set`);
-        resolve({
-          id: request.id,
+      // STEP 1: Check if already aborted before starting
+      if (this.shouldAbortAll || (this.shouldAbortCheck && this.shouldAbortCheck())) {
+        console.log(`[Thread ${objectId}] Aborted before OCR - match already found`);
+        timingLog.wasAborted = true;
+        timingLog.endTime = performance.now();
+        timingLog.totalDuration = timingLog.endTime - startTime;
+        this.threadTimingLogs.push(timingLog);
+
+        return {
+          objectId,
           text: 'None',
+          individualWords: [],
           success: false,
-          processingTime: 0,
+          processingTime: timingLog.totalDuration,
           wasAborted: true,
-        });
-        return;
+          timingLog,
+        };
       }
 
-      this.processing.add(request.id);
+      // STEP 2: Perform OCR (with abort signal)
+      console.log(`[Thread ${objectId}] Starting OCR...`);
+      timingLog.ocrStartTime = performance.now();
 
-      // Track abort controller
-      if (request.abortController) {
-        this.activeAbortControllers.add(request.abortController);
-      }
-
-      console.log(`🔍 Processing OCR request ${request.id}...`);
-
-      // Make API call with abort signal
       const response = await fetch('/api/ocr', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          Connection: 'keep-alive', // Reuse connections
+          Connection: 'keep-alive',
         },
-        body: JSON.stringify({ image: request.image }),
-        signal: request.abortController?.signal,
+        body: JSON.stringify({ image }),
+        signal: abortController.signal,
       });
 
       if (!response.ok) {
         throw new Error(`OCR API error: ${response.statusText}`);
       }
 
+      // Check if aborted before parsing JSON (prevents JSON parse errors on aborted requests)
+      if (this.shouldAbortAll || (this.shouldAbortCheck && this.shouldAbortCheck())) {
+        throw new Error('AbortError'); // Will be caught and handled as abort
+      }
+
       const data = await response.json();
-      const processingTime = performance.now() - startTime;
+      timingLog.ocrEndTime = performance.now();
+      timingLog.ocrDuration = timingLog.ocrEndTime - timingLog.ocrStartTime;
 
       const normalizedText = data.text || 'None';
       const individualWords = data.individualWords || [];
-      console.log(`OCR completed in ${processingTime.toFixed(2)}ms: "${normalizedText}"`);
+
+      console.log(
+        `[Thread ${objectId}] OCR completed in ${timingLog.ocrDuration.toFixed(2)}ms: "${normalizedText}"`
+      );
       if (individualWords.length > 0) {
         console.log(
-          `   Individual words: [${individualWords.map((w: string) => `"${w}"`).join(', ')}]`
+          `   [Thread ${objectId}] Individual words: [${individualWords.map((w: string) => `"${w}"`).join(', ')}]`
         );
       }
 
-      // CRITICAL: Check for match immediately after receiving result
-      if (this.matchCallback && normalizedText && normalizedText !== 'None') {
-        const isMatch = this.matchCallback(normalizedText, data.text, individualWords);
-        if (isMatch) {
-          console.log(`MATCH FOUND in OCR! "${normalizedText}" - Aborting other requests`);
-          this.abortAll();
+      // STEP 3: Check if aborted during OCR
+      if (this.shouldAbortAll || (this.shouldAbortCheck && this.shouldAbortCheck())) {
+        console.log(`[Thread ${objectId}] Aborted after OCR - match found in another thread`);
+        timingLog.wasAborted = true;
+        timingLog.endTime = performance.now();
+        timingLog.totalDuration = timingLog.endTime - startTime;
+        this.threadTimingLogs.push(timingLog);
+
+        return {
+          objectId,
+          text: normalizedText,
+          individualWords,
+          success: data.success,
+          processingTime: timingLog.totalDuration,
+          wasAborted: true,
+          timingLog,
+        };
+      }
+
+      // STEP 4: Check individual words for matches FIRST using O(1) Set lookup
+      // This allows any individual word match to trigger immediate abort + TTS
+      let matchFoundInIndividualWords = false;
+      let matchedWord = '';
+
+      if (
+        individualWords.length > 0 &&
+        this.requestedBusNumbers.size > 0 &&
+        this.matchCallback &&
+        !this.shouldAbortAll &&
+        (!this.shouldAbortCheck || !this.shouldAbortCheck())
+      ) {
+        console.log(`[Thread ${objectId}] Checking individual words against requested bus numbers`);
+
+        // Check each individual word
+        for (const word of individualWords) {
+          if (!word || word === 'None') continue;
+
+          // O(1) lookup: Check if this word is in requested bus numbers
+          if (this.requestedBusNumbers.has(word)) {
+            console.log(
+              `[Thread ${objectId}]  Found requested bus number in individual words: "${word}"`
+            );
+
+            matchedWord = word;
+            timingLog.matchCheckTime = performance.now();
+
+            try {
+              // Create timing trigger only (abort is handled by match callback)
+              const ttsTrigger = async () => {
+                timingLog.ttsTriggeredTime = performance.now();
+                timingLog.detectionToTTSDuration = timingLog.ttsTriggeredTime - detectionTime;
+                console.log(
+                  `[Thread ${objectId}] TTS TRIGGER CALLED! Total latency (detection→TTS call): ${timingLog.detectionToTTSDuration.toFixed(2)}ms`
+                );
+              };
+
+              // Fire match callback without waiting (it handles abort + TTS internally)
+              // This ensures minimal latency - we don't block this thread
+              this.matchCallback(word, objectId, ttsTrigger).catch((error) => {
+                console.error(
+                  `❌ [Thread ${objectId}] Match callback error for word "${word}":`,
+                  error
+                );
+              });
+
+              // Match found - mark for early return
+              matchFoundInIndividualWords = true;
+              break; // Stop checking other words
+            } catch (error) {
+              console.error(
+                `❌ [Thread ${objectId}] Match callback error for word "${word}":`,
+                error
+              );
+            }
+          }
         }
       }
 
-      const result: OCRResult = {
-        id: request.id,
-        text: normalizedText,
+      // STEP 5: If match was found in individual words, return early
+      if (matchFoundInIndividualWords) {
+        timingLog.endTime = performance.now();
+        timingLog.totalDuration = timingLog.endTime - startTime;
+        this.threadTimingLogs.push(timingLog);
+
+        console.log(
+          `[Thread ${objectId}] Match found in individual words: "${matchedWord}" (${timingLog.totalDuration.toFixed(2)}ms)`
+        );
+
+        return {
+          objectId,
+          text: matchedWord,
+          individualWords,
+          success: data.success,
+          processingTime: timingLog.totalDuration,
+          wasAborted: false,
+          timingLog,
+        };
+      }
+
+      // STEP 6: Complete timing log and return for non-match cases
+      timingLog.endTime = performance.now();
+      timingLog.totalDuration = timingLog.endTime - startTime;
+      this.threadTimingLogs.push(timingLog);
+
+      return {
+        objectId,
+        text: individualWords.join(' '),
+        individualWords,
         success: data.success,
-        processingTime,
+        processingTime: timingLog.totalDuration,
         wasAborted: false,
+        timingLog,
       };
-
-      // Cache result
-      this.cache.set(request.id, result);
-
-      resolve(result);
     } catch (error) {
-      const processingTime = performance.now() - startTime;
+      timingLog.endTime = performance.now();
+      timingLog.totalDuration = timingLog.endTime - startTime;
 
-      // Check if this was an abort
-      if (error instanceof Error && error.name === 'AbortError') {
-        console.log(`OCR request ${request.id} was aborted`);
-        resolve({
-          id: request.id,
+      // Check if this was an abort (multiple ways a fetch can be aborted)
+      const isAbortError =
+        (error instanceof Error && error.name === 'AbortError') ||
+        (error instanceof DOMException && error.name === 'AbortError') ||
+        (error instanceof Error && error.message === 'AbortError') ||
+        (error instanceof Error && error.message.includes('aborted')) ||
+        String(error).includes('aborted');
+
+      if (isAbortError) {
+        console.log(
+          `[Thread ${objectId}] Pipeline aborted after ${timingLog.totalDuration.toFixed(2)}ms`
+        );
+        timingLog.wasAborted = true;
+        this.threadTimingLogs.push(timingLog);
+
+        return {
+          objectId,
           text: 'None',
+          individualWords: [],
           success: false,
-          processingTime,
+          processingTime: timingLog.totalDuration,
           wasAborted: true,
-        });
-        return;
+          timingLog,
+        };
+      }
+
+      // Check for JSON parsing errors (usually means request was aborted)
+      if (error instanceof Error && error.message.includes('JSON')) {
+        console.log(
+          `[Thread ${objectId}] Request aborted (JSON parse error) after ${timingLog.totalDuration.toFixed(2)}ms`
+        );
+        timingLog.wasAborted = true;
+        this.threadTimingLogs.push(timingLog);
+
+        return {
+          objectId,
+          text: 'None',
+          individualWords: [],
+          success: false,
+          processingTime: timingLog.totalDuration,
+          wasAborted: true,
+          timingLog,
+        };
       }
 
       console.error(
-        `❌ OCR request ${request.id} failed after ${processingTime.toFixed(2)}ms:`,
+        `❌ [Thread ${objectId}] Pipeline failed after ${timingLog.totalDuration.toFixed(2)}ms:`,
         error
       );
+      this.threadTimingLogs.push(timingLog);
 
-      const result: OCRResult = {
-        id: request.id,
+      return {
+        objectId,
         text: 'None',
+        individualWords: [],
         success: false,
-        processingTime,
+        processingTime: timingLog.totalDuration,
         wasAborted: false,
+        timingLog,
       };
-
-      reject(error instanceof Error ? error : new Error(String(error)));
     } finally {
-      this.processing.delete(request.id);
+      // Release semaphore slot
+      this.runningCount--;
+      this.activeThreads.delete(objectId);
+      console.log(
+        `[Thread ${objectId}] Thread cleaned up [${this.runningCount}/${this.maxConcurrentThreads} slots]`
+      );
 
-      // Remove abort controller from tracking
-      if (request.abortController) {
-        this.activeAbortControllers.delete(request.abortController);
-      }
+      // Process next item from queue if available
+      this.processQueue();
     }
   }
 
   /**
-   * Generate request ID from image data (for deduplication)
+   * Get active thread count
    */
-  private generateRequestId(image: string): string {
-    // Use a simple hash of the image data
-    // In production, you might want to use a proper hash function
-    return image.substring(0, 100); // Use first 100 chars as simple ID
+  getActiveThreadCount(): number {
+    return this.runningCount;
   }
 
   /**
-   * Clear cache
+   * Check if any threads are active
    */
-  clearCache() {
-    this.cache.clear();
+  hasActiveThreads(): boolean {
+    return this.runningCount > 0;
   }
 
   /**
-   * Get statistics
+   * Get queue length
+   */
+  getQueueLength(): number {
+    return this.queue.length;
+  }
+
+  /**
+   * Get all thread timing logs
+   */
+  getTimingLogs(): ThreadTimingLog[] {
+    return [...this.threadTimingLogs];
+  }
+
+  /**
+   * Get statistics about thread performance
    */
   getStats() {
+    const logs = this.threadTimingLogs;
+    if (logs.length === 0) {
+      return {
+        totalThreads: 0,
+        activeThreads: this.runningCount,
+        queueLength: this.queue.length,
+      };
+    }
+
+    const completedLogs = logs.filter((log) => !log.wasAborted);
+    const avgOCR =
+      completedLogs.reduce((sum, log) => sum + (log.ocrDuration || 0), 0) /
+      (completedLogs.length || 1);
+    const avgValidation =
+      completedLogs.reduce((sum, log) => sum + (log.validationDuration || 0), 0) /
+      (completedLogs.length || 1);
+    const avgTotal =
+      completedLogs.reduce((sum, log) => sum + log.totalDuration, 0) / (completedLogs.length || 1);
+    const avgQueueWait =
+      logs
+        .filter((log) => log.queueWaitTime !== undefined)
+        .reduce((sum, log) => sum + (log.queueWaitTime || 0), 0) /
+      (logs.filter((log) => log.queueWaitTime !== undefined).length || 1);
+
+    const ttsLogs = logs.filter((log) => log.ttsTriggeredTime !== undefined);
+    const fastestTTS =
+      ttsLogs.length > 0
+        ? Math.min(...ttsLogs.map((log) => log.detectionToTTSDuration || Infinity))
+        : undefined;
+
     return {
+      totalThreads: logs.length,
+      completedThreads: completedLogs.length,
+      abortedThreads: logs.filter((log) => log.wasAborted).length,
+      activeThreads: this.runningCount,
       queueLength: this.queue.length,
-      processingCount: this.processing.size,
-      cacheSize: this.cache.size,
+      avgOCRTime: avgOCR,
+      avgValidationTime: avgValidation,
+      avgTotalTime: avgTotal,
+      avgQueueWaitTime: avgQueueWait,
+      ttsTriggers: ttsLogs.length,
+      fastestDetectionToTTS: fastestTTS,
     };
+  }
+
+  /**
+   * Clear timing logs
+   */
+  clearTimingLogs() {
+    this.threadTimingLogs = [];
   }
 }
 
-// Singleton instance
-export const parallelOCRProcessor = new ParallelOCRProcessor(3, 1, 50);
+// Singleton instance with max 10 concurrent threads
+export const parallelOCRProcessor = new ParallelOCRProcessor(10);

@@ -7,7 +7,7 @@ import { Tensor, loadAndCompile, loadLiteRt } from '@litertjs/core';
 type Accelerator = 'webgpu' | 'wasm';
 
 interface LiteRTModelCache {
-  model: any;
+  model: unknown;
   loadTime: number;
   accelerator: Accelerator;
 }
@@ -55,12 +55,14 @@ class LiteRTModelManager {
     this.supportsWebGPU = false;
     if ('gpu' in navigator && !this.isMobile) {
       try {
-        const adapter = await (navigator as any).gpu.requestAdapter();
+        const adapter = await (
+          navigator as { gpu?: { requestAdapter: () => Promise<unknown> } }
+        ).gpu?.requestAdapter();
         if (adapter) {
           this.supportsWebGPU = true;
           console.log('[LiteRT] WebGPU adapter found');
         }
-      } catch (error) {
+      } catch {
         console.log('[LiteRT] WebGPU not available, will use WASM');
         this.supportsWebGPU = false;
       }
@@ -76,7 +78,7 @@ class LiteRTModelManager {
     return this.isMobile ? 'wasm' : this.supportsWebGPU ? 'webgpu' : 'wasm';
   }
 
-  async loadModel(modelPath: string): Promise<any> {
+  async loadModel(modelPath: string): Promise<unknown> {
     await this.initialize();
 
     const cached = this.modelCache.get(modelPath);
@@ -185,19 +187,19 @@ class LiteRTModelManager {
     return results;
   }
 
-  async runInference(model: any, inputTensor: Tensor): Promise<Float32Array> {
+  async runInference(model: unknown, inputTensor: Tensor): Promise<Float32Array> {
     try {
       console.log('[LiteRT] Running inference...');
 
-      let outputs: any;
+      let outputs: unknown;
 
       if (typeof model === 'function') {
         outputs = model(inputTensor);
-      } else if (model && typeof (model as any).run === 'function') {
-        outputs = (model as any).run([inputTensor]);
+      } else if (model && typeof (model as { run?: unknown }).run === 'function') {
+        outputs = (model as { run: (args: Tensor[]) => unknown }).run([inputTensor]);
       } else {
         try {
-          outputs = model(inputTensor);
+          outputs = (model as (arg: Tensor) => unknown)(inputTensor);
         } catch (e) {
           throw new Error(`Model is not callable. Type: ${typeof model}, Error: ${e}`);
         }
@@ -206,13 +208,18 @@ class LiteRTModelManager {
       // Clean up input tensor
       inputTensor.delete();
 
-      const outList: any[] = Array.isArray(outputs) ? outputs : [outputs];
+      const outList: unknown[] = Array.isArray(outputs) ? outputs : [outputs];
 
       if (outList.length === 0) {
         throw new Error('Model returned no outputs');
       }
 
-      const outputTensorCpu = await outList[0].moveTo('wasm');
+      const firstOutput = outList[0] as {
+        moveTo: (
+          target: string
+        ) => Promise<{ toTypedArray: () => Float32Array; delete: () => void }>;
+      };
+      const outputTensorCpu = await firstOutput.moveTo('wasm');
       const outputData = outputTensorCpu.toTypedArray() as Float32Array;
 
       console.log('[LiteRT] Output shape inferred:', this.inferOutputShape(outputData));
@@ -223,7 +230,7 @@ class LiteRTModelManager {
     } catch (error) {
       try {
         inputTensor.delete();
-      } catch (e) {}
+      } catch {}
       console.error('[LiteRT] Inference error:', error);
       throw new Error(`Inference failed: ${error}`);
     }
@@ -264,7 +271,6 @@ class LiteRTModelManager {
     padY: number,
     confThreshold = 0.25,
     iouThreshold = 0.45,
-    inputSize = 640,
     opts: PostprocessOpts = {}
   ): Detection[] {
     const {
