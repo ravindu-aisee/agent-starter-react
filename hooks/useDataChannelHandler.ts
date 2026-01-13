@@ -7,6 +7,9 @@ interface DataChannelMessage {
   bus_number?: string;
   timestamp?: number;
   result?: string;
+  latitude?: number;
+  longitude?: number;
+  accuracy?: number;
 }
 
 interface DataChannelHandlerOptions {
