@@ -13,6 +13,7 @@ import {
 import { useChatMessages } from '@/hooks/useChatMessages';
 import { useConnectionTimeout } from '@/hooks/useConnectionTimout';
 import { useDebugMode } from '@/hooks/useDebug';
+import { useGeolocation } from '@/hooks/useGeolocation';
 import { cn } from '@/lib/utils';
 import { ScrollArea } from '../livekit/scroll-area/scroll-area';
 
@@ -72,6 +73,13 @@ export const SessionView = ({
   const messages = useChatMessages();
   const [chatOpen, setChatOpen] = useState(false);
   const scrollAreaRef = useRef<HTMLDivElement>(null);
+
+  // Request user's location and send to LiveKit agent on initialization
+  useGeolocation({
+    enabled: true,
+    sendOnConnect: true,
+    watchPosition: false, // Set to true if you want continuous location updates
+  });
 
   const controls: ControlBarControls = {
     leave: true,
